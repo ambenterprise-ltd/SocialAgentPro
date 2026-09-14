@@ -1,0 +1,24 @@
+[Unit]
+Description=AMB Enterprise YouTube Shorts Agent
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/amb-enterprise
+Environment=PATH=/opt/amb_venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+EnvironmentFile=-/home/ubuntu/amb-enterprise/.env
+ExecStart=/opt/amb_venv/bin/python server.py
+Restart=on-failure
+RestartSec=30
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=amb_enterprise
+MemoryMax=3G
+CPUQuota=80%
+
+[Install]
+WantedBy=multi-user.target

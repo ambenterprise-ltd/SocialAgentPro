@@ -1,0 +1,25 @@
+# AMB Enterprise - EC2 Server Requirements (Lean)
+# Excludes GUI, torch, faster-whisper, opencv - saves ~4-5 GB RAM.
+# Groq API handles all transcription; no local models needed on EC2.
+#
+# Install: pip install -r ec2/requirements_server.txt
+# Then:    playwright install chromium && playwright install-deps chromium
+
+yt-dlp>=2024.0.0
+groq>=0.4.0
+ffmpeg-python>=0.2.0
+moviepy>=1.0.3
+playwright>=1.40.0
+arabic-reshaper>=3.0.0
+python-bidi>=0.4.2
+pillow>=10.0.0
+psutil>=5.9.0
+google-api-python-client>=2.100.0
+google-auth-oauthlib>=1.1.0
+google-auth-httplib2>=0.1.1
+
+# NOT included on EC2 (saves 4-5 GB):
+# customtkinter>=5.2.0  GUI only
+# torch>=2.0.0          replaced by Groq API
+# faster-whisper>=1.0.0 replaced by Groq API
+# opencv-python>=4.8.0  replaced by Pillow

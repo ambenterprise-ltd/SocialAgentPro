@@ -1,0 +1,25 @@
+# AMB Enterprise - Full Requirements (Windows GUI + Local Fallback)
+# For EC2/Server deployments use: pip install -r ec2/requirements_server.txt
+
+# --- Core Pipeline (Required everywhere) ---
+yt-dlp>=2024.0.0
+groq>=0.4.0
+ffmpeg-python>=0.2.0
+google-api-python-client>=2.100.0
+google-auth-oauthlib>=1.1.0
+google-auth-httplib2>=0.1.1
+arabic-reshaper>=3.0.0
+python-bidi>=0.4.2
+playwright>=1.40.0
+moviepy>=1.0.3
+pillow>=10.0.0
+psutil>=5.9.0
+
+# --- GUI (Windows Desktop Only - NOT needed on EC2) ---
+customtkinter>=5.2.0
+
+# --- Local Transcription Fallback (NOT needed on EC2 - Groq API handles all transcription) ---
+# These packages consume ~2-5 GB RAM. Skip on EC2 unless you need offline fallback.
+torch>=2.0.0
+faster-whisper>=1.0.0
+opencv-python>=4.8.0
