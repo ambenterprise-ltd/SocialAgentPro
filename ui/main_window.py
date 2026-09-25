@@ -747,7 +747,7 @@ class MainWindow(ctk.CTk):
     def _open_system_precheck(self):
         """Opens the System Diagnostics & Health Pre-Check Modal."""
         active_prof = self.config_manager.get_active_profile_name()
-        SystemPrecheckModal(self, self.config_manager, channel_name=active_prof)
+        SystemPrecheckModal(self, self.config_manager, profile_name=active_prof)
 
     def _process_log_queue(self):
         """

@@ -14,10 +14,10 @@ class SystemPrecheckModal(ctk.CTkToplevel):
     and Google Sheets integration before production video generation runs.
     """
 
-    def __init__(self, parent, config_manager: ConfigManager, profile_name: Optional[str] = None):
+    def __init__(self, parent, config_manager: ConfigManager, profile_name: Optional[str] = None, channel_name: Optional[str] = None):
         super().__init__(parent)
         self.config_manager = config_manager
-        self.profile_name = profile_name or self.config_manager.get_active_profile_name()
+        self.profile_name = profile_name or channel_name or self.config_manager.get_active_profile_name()
         self.prechecker = SystemPrechecker(self.config_manager)
 
         self.title("AMB Enterprise - System Pre-Flight Diagnostics")

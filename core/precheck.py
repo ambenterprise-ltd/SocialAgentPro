@@ -116,6 +116,20 @@ class SystemPrechecker:
         """Verifies FFmpeg binary is accessible and executable."""
         ffmpeg_bin = shutil.which("ffmpeg")
         if not ffmpeg_bin:
+            candidate_dirs = [
+                r"C:\ffmpeg\bin",
+                r"C:\Program Files\ffmpeg\bin",
+                r"C:\Users\Dell\AppData\Local\Microsoft\WinGet\Packages\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe\ffmpeg-9.0.1-full_build\bin",
+                r"C:\Users\Dell\Downloads\ffmpeg-2026-08-30-git-818cecc6e1-essentials_build\ffmpeg-2026-08-30-git-818cecc6e1-essentials_build\bin",
+            ]
+            for c_dir in candidate_dirs:
+                c_exe = os.path.join(c_dir, "ffmpeg.exe")
+                if os.path.isfile(c_exe):
+                    ffmpeg_bin = c_exe
+                    os.environ["PATH"] = c_dir + os.pathsep + os.environ.get("PATH", "")
+                    break
+
+        if not ffmpeg_bin:
             return {
                 "category": "System & Tools",
                 "name": "FFmpeg Binary",
@@ -145,6 +159,20 @@ class SystemPrechecker:
     def _check_ffprobe(self) -> Dict[str, Any]:
         """Verifies FFprobe binary is accessible."""
         ffprobe_bin = shutil.which("ffprobe")
+        if not ffprobe_bin:
+            candidate_dirs = [
+                r"C:\ffmpeg\bin",
+                r"C:\Program Files\ffmpeg\bin",
+                r"C:\Users\Dell\AppData\Local\Microsoft\WinGet\Packages\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe\ffmpeg-9.0.1-full_build\bin",
+                r"C:\Users\Dell\Downloads\ffmpeg-2026-08-30-git-818cecc6e1-essentials_build\ffmpeg-2026-08-30-git-818cecc6e1-essentials_build\bin",
+            ]
+            for c_dir in candidate_dirs:
+                c_exe = os.path.join(c_dir, "ffprobe.exe")
+                if os.path.isfile(c_exe):
+                    ffprobe_bin = c_exe
+                    os.environ["PATH"] = c_dir + os.pathsep + os.environ.get("PATH", "")
+                    break
+
         if not ffprobe_bin:
             return {
                 "category": "System & Tools",

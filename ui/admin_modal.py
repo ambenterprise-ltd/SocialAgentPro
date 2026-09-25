@@ -470,10 +470,20 @@ class AdminSettingsModal(ctk.CTkToplevel):
         )
         self.copy_email_btn.pack(side="left")
 
+        self.open_cloud_btn = ctk.CTkButton(
+            email_row,
+            text="☁️ View on Cloud",
+            width=120,
+            fg_color="#1F6AA5",
+            hover_color="#144870",
+            command=self._open_google_cloud_service_accounts
+        )
+        self.open_cloud_btn.pack(side="left", padx=(6, 0))
+
         # Google Sheet Link / URL field
         ctk.CTkLabel(
             frame,
-            text="🔗 Google Sheet Link / URL (Paste your full Google Sheet link here):",
+            text="🔗 Google Sheet Link / URL (Auto-opens Editor Verification page when pasted):",
             font=ctk.CTkFont(size=11, weight="bold"),
             text_color="#FFFFFF"
         ).pack(anchor="w", pady=(4, 2))
@@ -488,6 +498,8 @@ class AdminSettingsModal(ctk.CTkToplevel):
         )
         self.sheets_url_entry.pack(side="left", fill="x", expand=True, padx=(0, 8))
         self.sheets_url_entry.bind("<KeyRelease>", self._on_sheets_url_changed)
+        self.sheets_url_entry.bind("<Control-v>", lambda e: self.after(50, self._on_sheets_url_changed))
+        self.sheets_url_entry.bind("<<Paste>>", lambda e: self.after(50, self._on_sheets_url_changed))
 
         self.open_sheet_btn = ctk.CTkButton(
             url_box,
@@ -1155,10 +1167,11 @@ class AdminSettingsModal(ctk.CTkToplevel):
             if sa_email:
                 self.service_email_entry.insert(0, sa_email)
             else:
-                self.service_email_entry.insert(0, "(Browse your Service Account .json file to see email)")
+                project_id = self._get_active_project_id()
+                self.service_email_entry.insert(0, f"service-account@{project_id}.iam.gserviceaccount.com")
             self.service_email_entry.configure(state="readonly")
         if hasattr(self, "copy_email_btn"):
-            self.copy_email_btn.configure(state="normal" if sa_email else "disabled")
+            self.copy_email_btn.configure(state="normal" if sa_email else "normal")
 
         if hasattr(self, "sheets_status_label"):
             if sheets_path and os.path.exists(sheets_path):
@@ -1304,16 +1317,63 @@ class AdminSettingsModal(ctk.CTkToplevel):
 
             self._test_sheets_connection()
 
+    def _get_active_project_id(self) -> str:
+        """Resolves the Google Cloud project ID from the active channel's OAuth credentials."""
+        cur_prof = self.active_profile_var.get() if hasattr(self, "active_profile_var") else self.config_manager.get_active_profile_name()
+        oauth_path = self.config_manager.get_channel_setting("youtube_oauth_json_path", "", cur_prof)
+        if oauth_path and os.path.exists(oauth_path):
+            try:
+                with open(oauth_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    inst = data.get("installed") or data.get("web") or {}
+                    pid = inst.get("project_id", "")
+                    if pid:
+                        return pid
+            except Exception:
+                pass
+        return "wealth-secret-509214"
+
+    def _open_google_cloud_service_accounts(self):
+        """Opens Google Cloud Console Service Accounts page directly for the active project."""
+        project_id = self._get_active_project_id()
+        console_url = f"https://console.cloud.google.com/iam-admin/serviceaccounts?project={project_id}"
+        try:
+            webbrowser.open(console_url)
+            if hasattr(self, "sheets_status_label"):
+                self.sheets_status_label.configure(
+                    text=f"☁️ Opened Google Cloud Console for project '{project_id}'. Copy your Service Account email or create key.",
+                    text_color="#58A6FF"
+                )
+        except Exception as e:
+            messagebox.showerror("Error", f"Could not open browser: {e}")
+
     def _on_sheets_url_changed(self, event=None):
-        """Auto-extracts spreadsheet ID when a user pastes a Google Sheet URL."""
+        """Auto-extracts spreadsheet ID and automatically opens editor verification page when URL is pasted."""
         if not hasattr(self, "sheets_url_entry") or not hasattr(self, "sheets_id_entry"):
             return
         url_text = self.sheets_url_entry.get().strip()
         if url_text:
             extracted_id = extract_spreadsheet_id(url_text)
-            if extracted_id and extracted_id != url_text:
-                self.sheets_id_entry.delete(0, "end")
-                self.sheets_id_entry.insert(0, extracted_id)
+            if extracted_id:
+                if extracted_id != url_text:
+                    self.sheets_id_entry.delete(0, "end")
+                    self.sheets_id_entry.insert(0, extracted_id)
+
+                # Auto-open editor verification page when a valid Google Sheet link is pasted
+                if "docs.google.com/spreadsheets/d/" in url_text:
+                    last_opened = getattr(self, "_last_opened_sheet_id", None)
+                    if last_opened != extracted_id:
+                        self._last_opened_sheet_id = extracted_id
+                        edit_url = f"https://docs.google.com/spreadsheets/d/{extracted_id}/edit?usp=sharing"
+                        try:
+                            webbrowser.open(edit_url)
+                            if hasattr(self, "sheets_status_label"):
+                                self.sheets_status_label.configure(
+                                    text="🌐 Opened Editor Verification page in browser! Make sure to grant 'Editor' access to the Service Account email.",
+                                    text_color="#58A6FF"
+                                )
+                        except Exception:
+                            pass
 
     def _on_sheets_id_changed(self, event=None):
         """Auto-constructs Google Sheet URL when a user enters an ID."""

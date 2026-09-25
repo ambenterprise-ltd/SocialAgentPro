@@ -11,6 +11,18 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_CONFIG_PATH = os.path.join(BASE_DIR, "settings.json")
 URDU_FONT_PATH = os.path.join(BASE_DIR, "urdu fonts", "JameelNooriNastaleeq.ttf")
 
+# Auto-detect and register FFmpeg in runtime PATH
+KNOWN_FFMPEG_PATHS = [
+    r"C:\ffmpeg\bin",
+    r"C:\Program Files\ffmpeg\bin",
+    os.path.join(BASE_DIR, "bin"),
+    r"C:\Users\Dell\AppData\Local\Microsoft\WinGet\Packages\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe\ffmpeg-9.0.1-full_build\bin",
+    r"C:\Users\Dell\Downloads\ffmpeg-2026-08-30-git-818cecc6e1-essentials_build\ffmpeg-2026-08-30-git-818cecc6e1-essentials_build\bin",
+]
+for p in KNOWN_FFMPEG_PATHS:
+    if os.path.isdir(p) and p.lower() not in os.environ.get("PATH", "").lower():
+        os.environ["PATH"] = p + os.pathsep + os.environ.get("PATH", "")
+
 
 class ConfigManager:
     """
