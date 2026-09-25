@@ -1,10 +1,20 @@
 import os
 import time
+import json
 import logging
+import threading
+import webbrowser
 from typing import Optional, List, Dict, Any, Tuple, Callable
 import customtkinter as ctk
 from tkinter import filedialog, messagebox
 from config import ConfigManager
+from ui.precheck_modal import SystemPrecheckModal
+from core.sheets_logger import (
+    GoogleSheetsLogger,
+    get_service_account_email,
+    extract_spreadsheet_id,
+    construct_spreadsheet_url
+)
 
 
 class AdminPasswordDialog(ctk.CTkToplevel):
@@ -183,6 +193,17 @@ class AdminSettingsModal(ctk.CTkToplevel):
         )
         del_profile_btn.pack(side="left", padx=4, pady=8)
 
+        precheck_btn = ctk.CTkButton(
+            profile_bar,
+            text="🩺 Pre-Check",
+            width=100,
+            fg_color="#1F6FEB",
+            hover_color="#388BFD",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            command=self._open_precheck_dialog
+        )
+        precheck_btn.pack(side="right", padx=(4, 10), pady=8)
+
         # --- CTkTabview Container (2 Tabs) ---
         self.tabview = ctk.CTkTabview(self, width=560, height=580)
         self.tabview.pack(padx=20, pady=(0, 10), fill="both", expand=True)
@@ -198,10 +219,33 @@ class AdminSettingsModal(ctk.CTkToplevel):
         footer = ctk.CTkFrame(self, fg_color="transparent")
         footer.pack(fill="x", padx=20, pady=8)
 
+        # Global Backup and Restore buttons on left side
+        backup_footer_btn = ctk.CTkButton(
+            footer,
+            text="☁️ Backup to Sheet",
+            width=140,
+            fg_color="#238636",
+            hover_color="#2EA043",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            command=self._global_backup_to_sheet
+        )
+        backup_footer_btn.pack(side="left", padx=(0, 8))
+
+        restore_footer_btn = ctk.CTkButton(
+            footer,
+            text="📥 Restore from Sheet",
+            width=150,
+            fg_color="#8957E5",
+            hover_color="#A371F7",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            command=self._global_restore_from_sheet
+        )
+        restore_footer_btn.pack(side="left")
+
         cancel_btn = ctk.CTkButton(
             footer,
             text="Cancel",
-            width=120,
+            width=110,
             fg_color="#3A3D40",
             hover_color="#4E5256",
             command=self.destroy
@@ -211,9 +255,10 @@ class AdminSettingsModal(ctk.CTkToplevel):
         save_btn = ctk.CTkButton(
             footer,
             text="💾 Save Settings",
-            width=150,
+            width=140,
             fg_color="#1F6AA5",
             hover_color="#144870",
+            font=ctk.CTkFont(size=12, weight="bold"),
             command=self._save_all_settings
         )
         save_btn.pack(side="right")
@@ -351,6 +396,206 @@ class AdminSettingsModal(ctk.CTkToplevel):
             width=480
         )
         self.ig_account_id_entry.pack(anchor="w", pady=(0, 15))
+
+        # --- GOOGLE SHEETS AUTOMATED LOGGING & CLOUD DISASTER RECOVERY ---
+        ctk.CTkLabel(
+            frame,
+            text="📊 Google Sheets Automated Logging & Cloud Disaster Recovery",
+            font=ctk.CTkFont(size=14, weight="bold")
+        ).pack(anchor="w", pady=(10, 2))
+
+        ctk.CTkLabel(
+            frame,
+            text="Browse Google Service Account .json to automatically log each channel on separate tabs in the same Google Sheet:",
+            font=ctk.CTkFont(size=11),
+            text_color="gray"
+        ).pack(anchor="w", pady=(0, 5))
+
+        sheets_box = ctk.CTkFrame(frame, fg_color="transparent")
+        sheets_box.pack(fill="x", pady=(0, 8))
+
+        self.sheets_path_entry = ctk.CTkEntry(
+            sheets_box,
+            placeholder_text="Path to Google Service Account .json...",
+            width=360
+        )
+        self.sheets_path_entry.pack(side="left", fill="x", expand=True, padx=(0, 8))
+
+        browse_sheets_btn = ctk.CTkButton(
+            sheets_box,
+            text="Browse JSON...",
+            width=110,
+            command=self._browse_sheets_json
+        )
+        browse_sheets_btn.pack(side="left")
+
+        # Service Account Email for Editor Permission (Highlight Box)
+        email_card = ctk.CTkFrame(frame, fg_color="#161B22", border_color="#30363D", border_width=1, corner_radius=6)
+        email_card.pack(fill="x", pady=(0, 10), padx=2)
+
+        ctk.CTkLabel(
+            email_card,
+            text="📧 Service Account Email (Editor Permission Required):",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            text_color="#58A6FF"
+        ).pack(anchor="w", padx=10, pady=(8, 2))
+
+        ctk.CTkLabel(
+            email_card,
+            text="Share your Google Spreadsheet with this email and assign 'Editor' access so the agent can write logs and backups:",
+            font=ctk.CTkFont(size=11),
+            text_color="#8B949E"
+        ).pack(anchor="w", padx=10, pady=(0, 6))
+
+        email_row = ctk.CTkFrame(email_card, fg_color="transparent")
+        email_row.pack(fill="x", padx=10, pady=(0, 8))
+
+        self.service_email_entry = ctk.CTkEntry(
+            email_row,
+            placeholder_text="(Select a valid Service Account JSON file above)",
+            font=ctk.CTkFont(family="Consolas", size=11),
+            state="readonly"
+        )
+        self.service_email_entry.pack(side="left", fill="x", expand=True, padx=(0, 8))
+
+        self.copy_email_btn = ctk.CTkButton(
+            email_row,
+            text="📋 Copy Email",
+            width=110,
+            fg_color="#21262D",
+            hover_color="#30363D",
+            border_color="#388BFD",
+            border_width=1,
+            command=self._copy_service_account_email
+        )
+        self.copy_email_btn.pack(side="left")
+
+        # Google Sheet Link / URL field
+        ctk.CTkLabel(
+            frame,
+            text="🔗 Google Sheet Link / URL (Paste your full Google Sheet link here):",
+            font=ctk.CTkFont(size=11, weight="bold"),
+            text_color="#FFFFFF"
+        ).pack(anchor="w", pady=(4, 2))
+
+        url_box = ctk.CTkFrame(frame, fg_color="transparent")
+        url_box.pack(fill="x", pady=(0, 8))
+
+        self.sheets_url_entry = ctk.CTkEntry(
+            url_box,
+            placeholder_text="https://docs.google.com/spreadsheets/d/1BxiMVs.../edit",
+            width=360
+        )
+        self.sheets_url_entry.pack(side="left", fill="x", expand=True, padx=(0, 8))
+        self.sheets_url_entry.bind("<KeyRelease>", self._on_sheets_url_changed)
+
+        self.open_sheet_btn = ctk.CTkButton(
+            url_box,
+            text="🔗 Open Sheet",
+            width=110,
+            fg_color="#1F6AA5",
+            hover_color="#144870",
+            command=self._open_sheet_in_browser
+        )
+        self.open_sheet_btn.pack(side="left")
+
+        # Spreadsheet ID (Auto-extracted)
+        ctk.CTkLabel(
+            frame,
+            text="Google Spreadsheet ID or Name (Auto-extracted from URL):",
+            font=ctk.CTkFont(size=11),
+            text_color="gray"
+        ).pack(anchor="w", pady=(0, 2))
+
+        self.sheets_id_entry = ctk.CTkEntry(
+            frame,
+            placeholder_text="Spreadsheet ID (e.g. 1BxiMVs0XRA5...) or Name",
+            width=480
+        )
+        self.sheets_id_entry.pack(anchor="w", pady=(0, 8))
+        self.sheets_id_entry.bind("<KeyRelease>", self._on_sheets_id_changed)
+
+        # Toggle Switch & Test Connection Button
+        sheets_ctrl_row = ctk.CTkFrame(frame, fg_color="transparent")
+        sheets_ctrl_row.pack(fill="x", pady=(0, 10))
+
+        self.enable_sheets_var = ctk.BooleanVar(value=True)
+        sheets_switch = ctk.CTkSwitch(
+            sheets_ctrl_row,
+            text="Enable Real-Time Google Sheets Logging",
+            variable=self.enable_sheets_var,
+            font=ctk.CTkFont(size=12, weight="bold")
+        )
+        sheets_switch.pack(side="left")
+
+        test_sheets_btn = ctk.CTkButton(
+            sheets_ctrl_row,
+            text="🔌 Test Connection",
+            width=140,
+            fg_color="#3A3D40",
+            hover_color="#4E5256",
+            command=self._test_sheets_connection
+        )
+        test_sheets_btn.pack(side="right")
+
+        self.sheets_status_label = ctk.CTkLabel(
+            frame,
+            text="Google Sheets Logging: Not configured",
+            font=ctk.CTkFont(size=11),
+            text_color="gray"
+        )
+        self.sheets_status_label.pack(anchor="w", pady=(0, 12))
+
+        # --- CLOUD BACKUP & DISASTER RECOVERY CARD ---
+        backup_card = ctk.CTkFrame(frame, fg_color="#1C2128", border_color="#30363D", border_width=1, corner_radius=6)
+        backup_card.pack(fill="x", pady=(0, 15), padx=2)
+
+        ctk.CTkLabel(
+            backup_card,
+            text="☁️ Agency Profile Cloud Backup & Restore (Google Sheet)",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            text_color="#FFFFFF"
+        ).pack(anchor="w", padx=10, pady=(8, 2))
+
+        ctk.CTkLabel(
+            backup_card,
+            text="Save complete backup of all channel profiles & settings to 'Agency_Config_Backup' tab in your Google Sheet, or restore settings anytime with 1 click:",
+            font=ctk.CTkFont(size=11),
+            text_color="#8B949E"
+        ).pack(anchor="w", padx=10, pady=(0, 8))
+
+        backup_btns_row = ctk.CTkFrame(backup_card, fg_color="transparent")
+        backup_btns_row.pack(fill="x", padx=10, pady=(0, 8))
+
+        self.backup_btn_card = ctk.CTkButton(
+            backup_btns_row,
+            text="☁️ Global Backup to Sheet",
+            width=190,
+            fg_color="#238636",
+            hover_color="#2EA043",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            command=self._global_backup_to_sheet
+        )
+        self.backup_btn_card.pack(side="left", padx=(0, 10))
+
+        self.restore_btn_card = ctk.CTkButton(
+            backup_btns_row,
+            text="📥 Global Restore from Sheet",
+            width=200,
+            fg_color="#8957E5",
+            hover_color="#A371F7",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            command=self._global_restore_from_sheet
+        )
+        self.restore_btn_card.pack(side="left")
+
+        self.backup_status_label = ctk.CTkLabel(
+            backup_card,
+            text="Backup: Ready (Saves all channel profiles to 'Agency_Config_Backup' tab)",
+            font=ctk.CTkFont(size=11),
+            text_color="#8B949E"
+        )
+        self.backup_status_label.pack(anchor="w", padx=10, pady=(0, 8))
 
     def _build_customization_tab(self):
         frame = ctk.CTkScrollableFrame(self.tab_custom)
@@ -870,6 +1115,57 @@ class AdminSettingsModal(ctk.CTkToplevel):
         if hasattr(self, "upload_ig_var"):
             self.upload_ig_var.set(self.config_manager.get_channel_setting("upload_to_instagram", True, profile_name))
 
+        # Google Sheets Service Account & Settings
+        sheets_path = (
+            self.config_manager.get_channel_setting("google_sheets_json_path", "", profile_name) or
+            self.config_manager.get("google_sheets_json_path", "")
+        )
+        sheets_id = (
+            self.config_manager.get_channel_setting("google_spreadsheet_id", "", profile_name) or
+            self.config_manager.get("google_spreadsheet_id", "")
+        )
+        sheets_url = (
+            self.config_manager.get_channel_setting("google_sheet_url", "", profile_name) or
+            self.config_manager.get("google_sheet_url", "")
+        )
+        if not sheets_url and sheets_id:
+            sheets_url = construct_spreadsheet_url(sheets_id)
+        if not sheets_id and sheets_url:
+            sheets_id = extract_spreadsheet_id(sheets_url)
+
+        sheets_enabled = self.config_manager.get_channel_setting("enable_google_sheets_logging", True, profile_name)
+
+        if hasattr(self, "sheets_path_entry"):
+            self.sheets_path_entry.delete(0, "end")
+            self.sheets_path_entry.insert(0, sheets_path)
+        if hasattr(self, "sheets_id_entry"):
+            self.sheets_id_entry.delete(0, "end")
+            self.sheets_id_entry.insert(0, sheets_id)
+        if hasattr(self, "sheets_url_entry"):
+            self.sheets_url_entry.delete(0, "end")
+            self.sheets_url_entry.insert(0, sheets_url)
+        if hasattr(self, "enable_sheets_var"):
+            self.enable_sheets_var.set(sheets_enabled)
+
+        # Update service account email display
+        sa_email = get_service_account_email(sheets_path)
+        if hasattr(self, "service_email_entry"):
+            self.service_email_entry.configure(state="normal")
+            self.service_email_entry.delete(0, "end")
+            if sa_email:
+                self.service_email_entry.insert(0, sa_email)
+            else:
+                self.service_email_entry.insert(0, "(Browse your Service Account .json file to see email)")
+            self.service_email_entry.configure(state="readonly")
+        if hasattr(self, "copy_email_btn"):
+            self.copy_email_btn.configure(state="normal" if sa_email else "disabled")
+
+        if hasattr(self, "sheets_status_label"):
+            if sheets_path and os.path.exists(sheets_path):
+                self.sheets_status_label.configure(text=f"✅ Google Service Account JSON Configured ({os.path.basename(sheets_path)})", text_color="#2EA043")
+            else:
+                self.sheets_status_label.configure(text="⚠️ Service account .json missing (logs will save locally only)", text_color="#D29922")
+
     def _on_profile_switched(self, selected_profile: str):
         """Called when a user switches the profile dropdown."""
         self.config_manager.set_active_profile(selected_profile)
@@ -984,6 +1280,212 @@ class AdminSettingsModal(ctk.CTkToplevel):
             self.yt_path_entry.delete(0, "end")
             self.yt_path_entry.insert(0, path)
 
+    def _browse_sheets_json(self):
+        path = filedialog.askopenfilename(
+            title="Select Google Sheets Service Account JSON File",
+            filetypes=[("JSON Files", "*.json"), ("All Files", "*.*")]
+        )
+        if path:
+            self.sheets_path_entry.delete(0, "end")
+            self.sheets_path_entry.insert(0, path)
+
+            # Update email display immediately
+            sa_email = get_service_account_email(path)
+            if hasattr(self, "service_email_entry"):
+                self.service_email_entry.configure(state="normal")
+                self.service_email_entry.delete(0, "end")
+                if sa_email:
+                    self.service_email_entry.insert(0, sa_email)
+                else:
+                    self.service_email_entry.insert(0, "(Could not find client_email in JSON)")
+                self.service_email_entry.configure(state="readonly")
+            if hasattr(self, "copy_email_btn"):
+                self.copy_email_btn.configure(state="normal" if sa_email else "disabled")
+
+            self._test_sheets_connection()
+
+    def _on_sheets_url_changed(self, event=None):
+        """Auto-extracts spreadsheet ID when a user pastes a Google Sheet URL."""
+        if not hasattr(self, "sheets_url_entry") or not hasattr(self, "sheets_id_entry"):
+            return
+        url_text = self.sheets_url_entry.get().strip()
+        if url_text:
+            extracted_id = extract_spreadsheet_id(url_text)
+            if extracted_id and extracted_id != url_text:
+                self.sheets_id_entry.delete(0, "end")
+                self.sheets_id_entry.insert(0, extracted_id)
+
+    def _on_sheets_id_changed(self, event=None):
+        """Auto-constructs Google Sheet URL when a user enters an ID."""
+        if not hasattr(self, "sheets_url_entry") or not hasattr(self, "sheets_id_entry"):
+            return
+        id_text = self.sheets_id_entry.get().strip()
+        url_text = self.sheets_url_entry.get().strip()
+        if id_text and not url_text:
+            full_url = construct_spreadsheet_url(id_text)
+            if full_url:
+                self.sheets_url_entry.delete(0, "end")
+                self.sheets_url_entry.insert(0, full_url)
+
+    def _open_sheet_in_browser(self):
+        """Opens the configured Google Sheet link in the user's default web browser."""
+        url = self.sheets_url_entry.get().strip() if hasattr(self, "sheets_url_entry") else ""
+        if not url:
+            sheet_id = self.sheets_id_entry.get().strip() if hasattr(self, "sheets_id_entry") else ""
+            if sheet_id:
+                url = construct_spreadsheet_url(sheet_id)
+
+        if url and (url.startswith("http://") or url.startswith("https://")):
+            try:
+                webbrowser.open(url)
+            except Exception as e:
+                messagebox.showerror("Error", f"Could not open browser: {e}")
+        else:
+            messagebox.showwarning(
+                "No URL Configured",
+                "Please paste a valid Google Sheet link or enter a Spreadsheet ID first."
+            )
+
+    def _copy_service_account_email(self):
+        """Copies the Service Account email to the clipboard for granting Google Sheet Editor permissions."""
+        if not hasattr(self, "service_email_entry"):
+            return
+        email = self.service_email_entry.get().strip()
+        if not email or "@" not in email:
+            messagebox.showwarning("No Email Found", "Please browse and select a valid Google Service Account .json file first.")
+            return
+
+        try:
+            self.clipboard_clear()
+            self.clipboard_append(email)
+            if hasattr(self, "copy_email_btn"):
+                orig_text = self.copy_email_btn.cget("text")
+                self.copy_email_btn.configure(text="✅ Copied!", fg_color="#238636")
+                self.after(2000, lambda: self.copy_email_btn.configure(text=orig_text, fg_color="#21262D"))
+        except Exception as e:
+            messagebox.showinfo("Email", f"Service Account Email:\n\n{email}")
+
+    def _test_sheets_connection(self):
+        path = self.sheets_path_entry.get().strip() if hasattr(self, "sheets_path_entry") else ""
+        target = self.sheets_id_entry.get().strip() if hasattr(self, "sheets_id_entry") else ""
+        sheet_url = self.sheets_url_entry.get().strip() if hasattr(self, "sheets_url_entry") else ""
+
+        if not target and sheet_url:
+            target = extract_spreadsheet_id(sheet_url)
+            if target and hasattr(self, "sheets_id_entry"):
+                self.sheets_id_entry.delete(0, "end")
+                self.sheets_id_entry.insert(0, target)
+
+        if not path or not os.path.exists(path):
+            self.sheets_status_label.configure(text="⚠️ Service account .json file not selected or missing.", text_color="#D29922")
+            messagebox.showwarning("JSON Missing", "Please select a valid Google Service Account .json file first.")
+            return
+        if not target:
+            self.sheets_status_label.configure(text="⚠️ Please enter a Google Spreadsheet ID, URL, or Name.", text_color="#D29922")
+            messagebox.showwarning("Spreadsheet Missing", "Please enter a Google Spreadsheet Link, ID, or Name to test connection.")
+            return
+
+        try:
+            from core.sheets_logger import GoogleSheetsLogger
+            logger = GoogleSheetsLogger(path, spreadsheet_id_or_profile=target)
+            ok, msg = logger.test_connection()
+            if ok:
+                self.sheets_status_label.configure(text=f"✅ {msg}", text_color="#2EA043")
+                messagebox.showinfo("Google Sheets Connected", f"Successfully verified Google Sheets access!\n\n{msg}")
+            else:
+                self.sheets_status_label.configure(text=f"❌ {msg}", text_color="#F85149")
+                messagebox.showwarning("Connection Notice", f"Google Sheets connection issue:\n\n{msg}")
+        except Exception as e:
+            self.sheets_status_label.configure(text=f"❌ Error: {e}", text_color="#F85149")
+            messagebox.showerror("Connection Error", f"Google Sheets connection error:\n{e}")
+
+    def _global_backup_to_sheet(self):
+        """Performs 1-click cloud backup of all agency profiles to Google Sheets."""
+        self._save_all_settings(silent=True)
+        active_prof = self.active_profile_var.get() if hasattr(self, "active_profile_var") else None
+        sheets_logger = GoogleSheetsLogger(self.config_manager, active_prof)
+
+        if not sheets_logger.is_configured():
+            messagebox.showwarning(
+                "Google Sheets Not Configured",
+                "Cannot perform cloud backup because Google Sheets is not configured.\n\n"
+                "Please configure a valid Google Service Account .json file and Google Sheet Link / ID."
+            )
+            return
+
+        if hasattr(self, "backup_status_label"):
+            self.backup_status_label.configure(text="⏳ Backing up agency profiles to Google Sheets...", text_color="#58A6FF")
+
+        def run_backup():
+            ok, msg = sheets_logger.backup_agency_profiles_to_sheet(self.config_manager)
+            if ok:
+                self.after(0, lambda: messagebox.showinfo("Cloud Backup Succeeded", msg))
+                if hasattr(self, "backup_status_label"):
+                    self.after(0, lambda: self.backup_status_label.configure(text=f"✅ {msg}", text_color="#2EA043"))
+            else:
+                self.after(0, lambda: messagebox.showerror("Cloud Backup Failed", msg))
+                if hasattr(self, "backup_status_label"):
+                    self.after(0, lambda: self.backup_status_label.configure(text=f"❌ {msg}", text_color="#F85149"))
+
+        threading.Thread(target=run_backup, daemon=True).start()
+
+    def _global_restore_from_sheet(self):
+        """Performs 1-click restore of agency profiles and configurations from Google Sheets."""
+        active_prof = self.active_profile_var.get() if hasattr(self, "active_profile_var") else None
+        sheets_logger = GoogleSheetsLogger(self.config_manager, active_prof)
+
+        if not sheets_logger.is_configured():
+            messagebox.showwarning(
+                "Google Sheets Not Configured",
+                "Cannot restore because Google Sheets is not configured.\n\n"
+                "Please configure a valid Google Service Account .json file and Google Sheet Link / ID."
+            )
+            return
+
+        confirm = messagebox.askyesno(
+            "Confirm Global Cloud Restore",
+            "⚠️ Are you sure you want to restore all agency channel profiles and settings from Google Sheets?\n\n"
+            "This will download the latest backup saved in your Google Sheet ('Agency_Config_Backup' tab) "
+            "and restore all channels, topics, prompts, intervals, and platform configurations.\n\n"
+            "(A local backup copy of your current settings.json will be saved automatically).\n\n"
+            "Do you want to proceed?"
+        )
+        if not confirm:
+            return
+
+        if hasattr(self, "backup_status_label"):
+            self.backup_status_label.configure(text="⏳ Restoring agency profiles from Google Sheets...", text_color="#58A6FF")
+
+        def run_restore():
+            ok, msg = sheets_logger.restore_agency_profiles_from_sheet(self.config_manager)
+            if ok:
+                def on_success():
+                    # Refresh active profile and load all restored fields into UI
+                    restored_active = self.config_manager.get_active_profile_name()
+                    self.active_profile_var.set(restored_active)
+                    self.profile_dropdown.configure(values=self.config_manager.get_profiles_list())
+                    self._load_fields_for_profile(restored_active)
+                    if getattr(self, "on_save_callback", None):
+                        try:
+                            self.on_save_callback(restored_active)
+                        except Exception:
+                            pass
+                    if hasattr(self, "backup_status_label"):
+                        self.backup_status_label.configure(text=f"✅ {msg}", text_color="#2EA043")
+                    messagebox.showinfo("Cloud Restore Succeeded", f"{msg}\n\nAll channel profiles and settings have been restored successfully!")
+
+                self.after(0, on_success)
+            else:
+                self.after(0, lambda: messagebox.showerror("Cloud Restore Failed", msg))
+                if hasattr(self, "backup_status_label"):
+                    self.after(0, lambda: self.backup_status_label.configure(text=f"❌ {msg}", text_color="#F85149"))
+
+        threading.Thread(target=run_restore, daemon=True).start()
+
+    def _open_precheck_dialog(self):
+        active_prof = self.active_profile_var.get() if hasattr(self, "active_profile_var") else None
+        SystemPrecheckModal(self, self.config_manager, profile_name=active_prof)
+
     def _clear_history(self):
         current_prof = self.active_profile_var.get()
         if messagebox.askyesno("Clear History", f"Reset processed history for '{current_prof}'? This clears video and clip duplication logs for this channel."):
@@ -991,7 +1493,7 @@ class AdminSettingsModal(ctk.CTkToplevel):
             self.config_manager.set_channel_setting("generated_clips_history", [], current_prof)
             self.history_label.configure(text="Total Unique Videos Processed: 0 | Total Clips Recorded: 0")
 
-    def _save_all_settings(self):
+    def _save_all_settings(self, silent: bool = False):
         try:
             active_prof = self.active_profile_var.get()
             self.config_manager.set_active_profile(active_prof)
@@ -1056,6 +1558,25 @@ class AdminSettingsModal(ctk.CTkToplevel):
             self.config_manager.set_channel_setting("upload_to_facebook", upload_fb, active_prof)
             self.config_manager.set_channel_setting("upload_to_instagram", upload_ig, active_prof)
 
+            # Save Google Sheets Automated Logging Settings
+            sheets_path = self.sheets_path_entry.get().strip() if hasattr(self, "sheets_path_entry") else ""
+            sheets_id = self.sheets_id_entry.get().strip() if hasattr(self, "sheets_id_entry") else ""
+            sheets_url = self.sheets_url_entry.get().strip() if hasattr(self, "sheets_url_entry") else ""
+            sheets_enabled = self.enable_sheets_var.get() if hasattr(self, "enable_sheets_var") else True
+
+            if not sheets_id and sheets_url:
+                sheets_id = extract_spreadsheet_id(sheets_url)
+            if not sheets_url and sheets_id:
+                sheets_url = construct_spreadsheet_url(sheets_id)
+
+            self.config_manager.set_channel_setting("google_sheets_json_path", sheets_path, active_prof)
+            self.config_manager.set_channel_setting("google_spreadsheet_id", sheets_id, active_prof)
+            self.config_manager.set_channel_setting("google_sheet_url", sheets_url, active_prof)
+            self.config_manager.set_channel_setting("enable_google_sheets_logging", sheets_enabled, active_prof)
+            self.config_manager.set("google_sheets_json_path", sheets_path)
+            self.config_manager.set("google_spreadsheet_id", sheets_id)
+            self.config_manager.set("google_sheet_url", sheets_url)
+
             old_autopilot = self.config_manager.get_channel_setting("auto_pilot", False, active_prof)
             old_interval = self.config_manager.get_channel_setting("autopilot_interval_hours", 2, active_prof)
 
@@ -1111,8 +1632,14 @@ class AdminSettingsModal(ctk.CTkToplevel):
                 except Exception as cb_err:
                     pass
 
+            if silent:
+                return True
+
             messagebox.showinfo("Settings Saved", f"Settings for channel profile '{active_prof}' updated successfully!")
             self.destroy()
+            return True
 
         except Exception as e:
-            messagebox.showerror("Save Error", f"Failed to save settings: {e}")
+            if not silent:
+                messagebox.showerror("Save Error", f"Failed to save settings: {e}")
+            return False

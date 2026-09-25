@@ -161,12 +161,27 @@ class ShortsAutomationPipeline:
                 active_lang = "English"
                 lang_code = "en"
 
-        self.logger.info(f"=== STARTING HEADLESS 1-SHORT PIPELINE [Profile: '{chan_name}', Language: '{active_lang}'] ===")
+        self.logger.info(f"🎬 [Pipeline] Starting Short Generation for '{chan_name}' ({active_lang})...")
+
+        # --- Pre-Flight System Health & Connectivity Check ---
+        try:
+            from core.precheck import SystemPrechecker
+            prechecker = SystemPrechecker(self.config_manager, logger=None)
+            diag = prechecker.run_all_checks(profile_name=chan_name)
+            if not diag.get("critical_ok", True):
+                crit_fails = [c["message"] for c in diag["checks"] if c["status"] == "FAIL" and c.get("critical", False)]
+                err_summary = " | ".join(crit_fails)
+                self.logger.error(f"[Pre-Check Block] Halting execution due to critical failure(s): {err_summary}")
+                raise RuntimeError(f"System Pre-Check Failed: {err_summary}")
+        except RuntimeError:
+            raise
+        except Exception as precheck_err:
+            self.logger.debug(f"[Pre-Check Notice] Non-blocking pre-check exception: {precheck_err}")
 
         # Run maintenance purge on expired files from previous runs
         purged = self.config_manager.check_and_purge_expired_files()
         if purged:
-            self.logger.info(f"[Auto-Cleanup] Cleaned up {len(purged)} expired clip(s).")
+            self.logger.debug(f"[Auto-Cleanup] Cleaned up {len(purged)} expired clip(s).")
 
         # Directories
         dirs = self.config_manager.get_channel_output_dirs(chan_name)
@@ -179,9 +194,7 @@ class ShortsAutomationPipeline:
 
         # Hardware acceleration settings
         hw = self.config_manager.get_hardware_settings()
-        self.logger.info(f"⚡ [Hardware Resources] Profile: '{self.config_manager.get('hardware_profile')}'")
-        self.logger.info(f"⚡ [Hardware Auto-Detect] {hw.get('summary', '')}")
-        self.logger.info(f"🌐 [Pipeline Language] Mode: '{active_lang}' (ISO: '{lang_code}')")
+        self.logger.debug(f"[Hardware] Profile: '{self.config_manager.get('hardware_profile')}' | {hw.get('summary', '')}")
 
         ingestion = MediaIngestionEngine(output_dir=dirs["source_videos"], logger=self.logger)
         transcriber = WhisperTranscriber(logger=self.logger)
@@ -255,7 +268,7 @@ class ShortsAutomationPipeline:
 
             candidates = []
             if target_channel:
-                self.logger.info(f"[Pipeline] Flat scraping 15 recent videos from channel: {target_channel}...")
+                self.logger.info(f"🔍 [Discovery] Checking recent videos from channel: {target_channel}...")
                 try:
                     candidates = ingestion.fetch_channel_recent_videos(target_channel, limit=15)
                 except Exception as e:
@@ -272,7 +285,7 @@ class ShortsAutomationPipeline:
                 )
 
             negative_filters = self.config_manager.get_negative_filters(chan_name)
-            self.logger.info(f"[Pipeline] Evaluating {len(unprocessed)} unprocessed candidates for topic '{topic}' (Negative exclusions: {len(negative_filters)})...")
+            self.logger.debug(f"[Pipeline] Evaluating {len(unprocessed)} unprocessed candidates for topic '{topic}'...")
 
             # Iterate through channel candidates and validate transcript relevance
             for cand in unprocessed:
@@ -287,11 +300,11 @@ class ShortsAutomationPipeline:
 
                 # Shorts & duration check (require >= 300s)
                 if "/shorts/" in cand_url.lower() or "#shorts" in cand_title.lower() or "#short" in cand_title.lower():
-                    self.logger.info(f"[Pipeline] Channel candidate '{cand_title}' ({cand_id}) is a Short. Skipping...")
+                    self.logger.debug(f"[Pipeline] Candidate '{cand_title}' ({cand_id}) is a Short. Skipping...")
                     self.state_tracker.mark_failed(cand_id, reason="skipped_short")
                     continue
                 if cand_dur and 0 < cand_dur < 300:
-                    self.logger.info(f"[Pipeline] Channel candidate '{cand_title}' ({cand_id}) duration ({cand_dur}s) < 300s. Skipping short video...")
+                    self.logger.debug(f"[Pipeline] Candidate '{cand_title}' ({cand_id}) duration ({cand_dur}s) < 300s. Skipping...")
                     self.state_tracker.mark_failed(cand_id, reason="skipped_too_short")
                     continue
 
@@ -303,27 +316,27 @@ class ShortsAutomationPipeline:
                         "crorepati", "indian", "india"
                     ]
                     if any(reg in cand_title.lower() for reg in regional_exclusions):
-                        self.logger.info(
-                            f"[Pipeline] Channel candidate '{cand_title}' ({cand_id}) matches regional Indian/South Asian filter. Skipping..."
+                        self.logger.debug(
+                            f"[Pipeline] Candidate '{cand_title}' ({cand_id}) matches regional South Asian filter. Skipping..."
                         )
                         self.state_tracker.mark_failed(cand_id, reason="skipped_regional_language")
                         continue
 
                 # Negative filter exclusion check
                 if negative_filters and any(neg.lower() in cand_title.lower() for neg in negative_filters):
-                    self.logger.warning(
-                        f"[Pipeline] Candidate '{cand_title}' ({cand_id}) matches negative filter exclusion. Skipping off-niche candidate..."
+                    self.logger.debug(
+                        f"[Pipeline] Candidate '{cand_title}' ({cand_id}) matches negative filter. Skipping..."
                     )
                     self.state_tracker.mark_failed(cand_id, reason="skipped_negative_filter")
                     continue
 
-                self.logger.info(f"[Pipeline] Checking headless transcript & topic relevance for '{cand_title}' ({cand_id})...")
+                self.logger.debug(f"[Pipeline] Checking transcript & topic relevance for '{cand_title}' ({cand_id})...")
                 cache_suffix = f"_{lang_code}" if lang_code != "en" else ""
                 cache_json = os.path.join(transcripts_dir, f"{cand_id}{cache_suffix}_transcript.json")
                 t_data = transcriber.fetch_headless_transcript(cand_id, cache_json_path=cache_json, language=lang_code)
 
                 if not t_data or not t_data.get("words"):
-                    self.logger.warning(f"[Pipeline] Channel candidate '{cand_id}' has no transcript available. Marking as 'failed_no_transcript'...")
+                    self.logger.debug(f"[Pipeline] Candidate '{cand_id}' has no transcript available. Skipping...")
                     self.state_tracker.mark_failed(cand_id, reason="failed_no_transcript")
                     continue
 
@@ -334,9 +347,8 @@ class ShortsAutomationPipeline:
                 # (or at least 1 keyword match in the title) to prevent wasting LLM calls on off-topic videos.
                 title_relevance = self._calculate_relevance(cand_title, topic_keywords)
                 if title_relevance == 0 and topic_mentions < 3:
-                    self.logger.warning(
-                        f"[Pipeline] Candidate '{cand_title}' ({cand_id}) has low/zero relevance to '{topic}' "
-                        f"(Title matches: 0, Transcript topic mentions: {topic_mentions} in 20 min). Skipping off-topic candidate..."
+                    self.logger.debug(
+                        f"[Pipeline] Candidate '{cand_title}' ({cand_id}) has low relevance to '{topic}'. Skipping..."
                     )
                     self.state_tracker.mark_failed(cand_id, reason="skipped_off_topic")
                     continue
@@ -346,8 +358,7 @@ class ShortsAutomationPipeline:
                 video_title = cand_title
                 transcript_data = t_data
                 self.logger.info(
-                    f"[Pipeline] Successfully locked onto topic-matching candidate: '{video_title}' ({video_id}) "
-                    f"with {topic_mentions} topic mentions in transcript."
+                    f"📺 [Discovery] Locked onto topic video: '{video_title}' ({video_id})"
                 )
                 break
 
@@ -356,8 +367,7 @@ class ShortsAutomationPipeline:
                 ctx = self.config_manager.get_channel_context(chan_name)
                 content_type = ctx.get("content_type", "podcast")
                 self.logger.info(
-                    f"[Pipeline] Channel candidates were off-topic or exhausted. "
-                    f"Falling back to YouTube topic {content_type} discovery for '{topic}' using search keywords..."
+                    f"🔍 [Discovery] Searching YouTube for '{topic}' ({content_type})..."
                 )
 
                 # Tune topic search terms with full-length intent keywords and enforce American/US English
@@ -398,9 +408,8 @@ class ShortsAutomationPipeline:
 
                 # Secondary search fallback if all initial candidates were already processed/failed
                 if not unprocessed_search:
-                    self.logger.warning(
-                        f"[Pipeline] All initial search candidates were already processed or skipped. "
-                        f"Attempting secondary broadened search for topic '{topic}'..."
+                    self.logger.debug(
+                        f"[Pipeline] Initial candidates processed. Attempting secondary search for '{topic}'..."
                     )
                     secondary_queries = [
                         f"{topic} American podcast full episode US",
@@ -442,11 +451,11 @@ class ShortsAutomationPipeline:
 
                     # Shorts & duration check (require >= 300s)
                     if "/shorts/" in cand_url.lower() or "#shorts" in cand_title.lower() or "#short" in cand_title.lower():
-                        self.logger.info(f"[Pipeline] Search candidate '{cand_title}' ({cand_id}) is a Short. Skipping...")
+                        self.logger.debug(f"[Pipeline] Search candidate '{cand_title}' ({cand_id}) is a Short. Skipping...")
                         self.state_tracker.mark_failed(cand_id, reason="skipped_short")
                         continue
                     if cand_dur and 0 < cand_dur < 300:
-                        self.logger.info(f"[Pipeline] Search candidate '{cand_title}' ({cand_id}) duration ({cand_dur}s) < 300s. Skipping short video...")
+                        self.logger.debug(f"[Pipeline] Search candidate '{cand_title}' ({cand_id}) duration ({cand_dur}s) < 300s. Skipping...")
                         self.state_tracker.mark_failed(cand_id, reason="skipped_too_short")
                         continue
 
@@ -458,29 +467,28 @@ class ShortsAutomationPipeline:
                             "crorepati", "indian", "india"
                         ]
                         if any(reg in cand_title.lower() for reg in regional_exclusions):
-                            self.logger.info(
-                                f"[Pipeline] Search candidate '{cand_title}' ({cand_id}) matches regional Indian/South Asian filter. Skipping..."
+                            self.logger.debug(
+                                f"[Pipeline] Search candidate '{cand_title}' ({cand_id}) matches regional South Asian filter. Skipping..."
                             )
                             self.state_tracker.mark_failed(cand_id, reason="skipped_regional_language")
                             continue
 
                     # Negative filter exclusion check
                     if negative_filters and any(neg.lower() in cand_title.lower() for neg in negative_filters):
-                        self.logger.warning(
-                            f"[Pipeline] Search candidate '{cand_title}' matches negative filter. Skipping off-niche candidate..."
+                        self.logger.debug(
+                            f"[Pipeline] Search candidate '{cand_title}' matches negative filter. Skipping..."
                         )
                         self.state_tracker.mark_failed(cand_id, reason="skipped_negative_filter")
                         continue
 
-                    self.logger.info(f"[Pipeline] Checking transcript for topic search result: '{cand_title}' ({cand_id})...")
+                    self.logger.debug(f"[Pipeline] Checking transcript for '{cand_title}' ({cand_id})...")
                     cache_suffix = f"_{lang_code}" if lang_code != "en" else ""
                     cache_json = os.path.join(transcripts_dir, f"{cand_id}{cache_suffix}_transcript.json")
                     t_data = transcriber.fetch_headless_transcript(cand_id, cache_json_path=cache_json, language=lang_code)
 
                     if not t_data or not t_data.get("words"):
-                        self.logger.warning(
-                            f"[Pipeline] Search candidate '{cand_title}' ({cand_id}) has no extractable '{lang_code}' transcript. "
-                            f"Marking as 'failed_no_transcript' and testing next candidate..."
+                        self.logger.debug(
+                            f"[Pipeline] Search candidate '{cand_title}' ({cand_id}) has no extractable '{lang_code}' transcript. Skipping..."
                         )
                         self.state_tracker.mark_failed(cand_id, reason="failed_no_transcript")
                         continue
@@ -490,9 +498,8 @@ class ShortsAutomationPipeline:
 
                     title_relevance = self._calculate_relevance(cand_title, topic_keywords)
                     if title_relevance == 0 and topic_mentions < 3:
-                        self.logger.warning(
-                            f"[Pipeline] Search candidate '{cand_title}' ({cand_id}) has low relevance "
-                            f"(Title matches: 0, Transcript mentions: {topic_mentions}). Skipping off-topic candidate..."
+                        self.logger.debug(
+                            f"[Pipeline] Search candidate '{cand_title}' ({cand_id}) has low relevance to '{topic}'. Skipping..."
                         )
                         self.state_tracker.mark_failed(cand_id, reason="skipped_off_topic")
                         continue
@@ -502,8 +509,7 @@ class ShortsAutomationPipeline:
                     video_title = cand_title
                     transcript_data = t_data
                     self.logger.info(
-                        f"[Pipeline] Successfully locked onto topic search video: '{video_title}' ({video_id}) "
-                        f"with {topic_mentions} topic mentions."
+                        f"📺 [Discovery] Locked onto topic video: '{video_title}' ({video_id})"
                     )
                     break
 
@@ -522,7 +528,7 @@ class ShortsAutomationPipeline:
         if not key_pool:
             raise ValueError("No Groq API Keys configured! Please add a key in Admin Settings.")
 
-        self.logger.info(f"[Pipeline] Querying Groq LLM Brain to find viral 58-second window for '{video_id}'...")
+        self.logger.debug(f"[Pipeline] Querying Groq LLM Brain for '{video_id}'...")
         clip_extractor = ViralClipExtractor(api_keys=key_pool, logger=self.logger)
         planned_clips = clip_extractor.extract_viral_clips(
             transcript_data=transcript_data,
@@ -544,8 +550,6 @@ class ShortsAutomationPipeline:
         duration_sec = float(target_clip["duration"])
         clip_title = target_clip.get("title", "Viral Short")
 
-        self.logger.info(f"[Pipeline] Selected Viral Segment: '{clip_title}' [{start_sec:.1f}s - {end_sec:.1f}s] ({duration_sec:.1f}s)")
-
         # --- PHASE 5: Partial Video Download (Only 58 Seconds!) ---
         if stop_checker and stop_checker():
             self.logger.warning("Pipeline halted by user.")
@@ -558,7 +562,7 @@ class ShortsAutomationPipeline:
         os.makedirs(clip_work_dir, exist_ok=True)
         partial_raw_path = os.path.join(clip_work_dir, f"{video_id}_partial_raw.mp4")
 
-        self.logger.info(f"[Pipeline] Streaming and downloading ONLY the {duration_sec:.1f}s segment directly from YouTube...")
+        self.logger.info(f"⬇️ [Ingestion] Downloading {duration_sec:.1f}s video segment...")
         ingestion.download_partial_video(
             url=target_url,
             start_sec=start_sec,
@@ -586,12 +590,10 @@ class ShortsAutomationPipeline:
 
             if sliced_words:
                 target_clip["aligned_words"] = sliced_words
-                self.logger.info(f"[Pipeline] Sliced {len(sliced_words)} high-precision words synced to [0.0s - {duration_sec:.1f}s] (offset by -{start_sec:.1f}s).")
-                print(f"[Whisper Output] Successfully extracted {len(sliced_words)} segmented word strings for clip '{video_id}'.")
-                print(f"[Whisper Timestamps] First word: '{sliced_words[0].get('word')}' [{sliced_words[0].get('start', 0):.2f}s - {sliced_words[0].get('end', 0):.2f}s] | Last word: '{sliced_words[-1].get('word')}' [{sliced_words[-1].get('start', 0):.2f}s - {sliced_words[-1].get('end', 0):.2f}s]")
+                self.logger.debug(f"[Pipeline] Sliced {len(sliced_words)} words synced to [0.0s - {duration_sec:.1f}s].")
             elif os.path.exists(partial_raw_path):
                 # Fallback: align partial clip directly with Groq Whisper Large-V3 API (not local CPU tiny)
-                self.logger.info(f"[Pipeline] Slicing empty; aligning with Groq Whisper Large-V3 API (language='{lang_code}')...")
+                self.logger.debug(f"[Pipeline] Slicing empty; aligning with Groq Whisper Large-V3 API (language='{lang_code}')...")
                 first_key = key_pool[0] if key_pool else None
                 accurate_words = transcriber.align_partial_clip_words(partial_raw_path, api_key=first_key, language=lang_code)
                 target_clip["aligned_words"] = accurate_words or []
@@ -686,40 +688,31 @@ class ShortsAutomationPipeline:
                 self.config_manager.mark_clip_uploaded(final_mp4, pub_results, profile_name=chan_name)
                 platforms_list = [p.capitalize() for p in pub_results.get("platforms", [])]
                 platforms_str = ", ".join(platforms_list)
-                self.logger.info("[Pipeline] Successfully published to: %s", platforms_str)
-                print(f"\n[Multi-Platform Success] Published to {success_count} platform(s): {platforms_str}!\n")
+                self.logger.info(f"🚀 [Publisher] Successfully published to {platforms_str}!")
                 upload_successful = True
 
                 # ── Auto-Delete After Confirmed Upload ──────────────────
-                # The upload returned valid IDs — video is safely published on social platforms.
-                # Delete local copy now to free disk space immediately.
                 if not pub_results.get("errors"):
                     self.logger.info(
-                        "[Auto-Cleanup] Video '%s' confirmed uploaded to %s. "
-                        "Deleting local file to free disk space...",
-                        clip_title,
-                        platforms_str
+                        f"🧹 [Auto-Cleanup] Upload confirmed to {platforms_str}. Removed local copy."
                     )
                     self._cleanup_file_safely(final_mp4)
                     self.config_manager.mark_clip_deleted(final_mp4)
                     final_mp4 = ""  # Clear path to signal file is gone
                 else:
                     self.logger.warning(
-                        "[Auto-Cleanup] Partial platform upload errors: %s. Local file preserved at: %s",
-                        pub_results["errors"], final_mp4
+                        f"[Auto-Cleanup] Partial platform upload errors: {pub_results['errors']}. Local file preserved."
                     )
             else:
                 if pub_results.get("errors"):
                     self.logger.warning(
-                        "[Pipeline] Upload failed with errors: %s. Local file preserved at: %s",
-                        pub_results["errors"], final_mp4
+                        f"[Pipeline] Upload failed with errors: {pub_results['errors']}. Local file preserved at: {final_mp4}"
                     )
                 else:
-                    self.logger.info("[Pipeline] No social platforms enabled or credentials provided. Video saved locally: %s", final_mp4)
+                    self.logger.info(f"[Pipeline] No social platforms enabled. Video saved locally: {final_mp4}")
         except Exception as e:
             self.logger.warning(
-                "[Pipeline] Multi-platform publishing error: %s. Local file preserved at: %s",
-                e, final_mp4
+                f"[Pipeline] Multi-platform publishing note: {e}. Local file preserved at: {final_mp4}"
             )
 
         # ── Temp Captions Cleanup ─────────────────────────────────────────────
@@ -729,7 +722,34 @@ class ShortsAutomationPipeline:
         # ── Junk File Cleanup (orphaned MoviePy temp files in project root) ───
         self._cleanup_junk_temp_files()
 
-        self.logger.info("=== ULTRA-FAST 1-SHORT PIPELINE FINISHED! Output: %s ===", final_mp4 or "(uploaded & deleted)")
+        # ── Google Sheets Multi-Channel Logging ───────────────────────────────
+        try:
+            sheets_path = (
+                self.config_manager.get_channel_setting("google_sheets_json_path", "", chan_name) or
+                self.config_manager.get("google_sheets_json_path", "")
+            ).strip()
+            sheet_target = (
+                self.config_manager.get_channel_setting("google_spreadsheet_id", "", chan_name) or
+                self.config_manager.get("google_spreadsheet_id", "")
+            ).strip()
+            sheets_enabled = self.config_manager.get_channel_setting("enable_google_sheets_logging", True, chan_name)
+
+            if sheets_enabled and sheets_path and os.path.exists(sheets_path):
+                from core.sheets_logger import GoogleSheetsLogger
+                last_time = float(self.config_manager.get_channel_setting("last_autopilot_run", 0, chan_name) or 0)
+                next_time = float(self.config_manager.get_channel_setting("next_autopilot_run", 0, chan_name) or 0)
+                sheets_logger = GoogleSheetsLogger(sheets_path, spreadsheet_id_or_name=sheet_target or "Social Agent Pro Logs", logger=self.logger)
+                sheets_logger.log_video_upload_async(
+                    channel_name=chan_name,
+                    clip_data=target_clip,
+                    upload_results=pub_results if 'pub_results' in locals() and pub_results else {},
+                    last_video_time=last_time,
+                    next_scheduled_time=next_time
+                )
+        except Exception as sheet_err:
+            self.logger.warning(f"[Pipeline] Google Sheets logging notice: {sheet_err}")
+
+        self.logger.info(f"🎉 [Pipeline] 1-Short Cycle Complete for '{chan_name}'!")
         return [target_clip]
 
     def _cleanup_temp_captions_dir(self, video_id: str = "") -> None:

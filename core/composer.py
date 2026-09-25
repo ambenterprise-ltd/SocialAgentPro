@@ -628,13 +628,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         with open(ass_output_path, "w", encoding="utf-8") as f:
             f.write(full_ass_content)
 
-        self.logger.info(f"[Composer] Generated ASS Subtitle file: {ass_output_path} (Lang: {language}, Font: {font_name}, MarginV: {margin_v})")
-        print(f"[Composer ASS Generation] File: {ass_output_path} | Font: '{font_name}' | Language: '{language}' | Total Dialogue Lines: {len(dialogue_events)}")
-        if dialogue_events:
-            print(f"[Composer ASS Sample] First line: {dialogue_events[0]}")
-            print(f"[Composer ASS Sample] Last line: {dialogue_events[-1]}")
-        else:
-            print(f"[Composer ASS WARNING] Zero dialogue events were generated! Check words input.")
+        self.logger.debug(f"[Composer] Generated ASS Subtitle file: {ass_output_path} (Font: {font_name})")
         return ass_output_path
 
     def detect_template_viewport(self, template_path: Optional[str]) -> Tuple[int, int, int, int, Optional[str]]:
@@ -664,7 +658,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                 vh_raw = max(trans_y) - vy_raw
                 vy = int(vy_raw * scale_y)
                 vh = int(vh_raw * scale_y)
-                self.logger.info(f"[Composer] Detected existing transparent template viewport: Y={vy} to {vy + vh} (Height: {vh}px).")
+                self.logger.debug(f"[Composer] Detected existing transparent template viewport: Y={vy} to {vy + vh} (Height: {vh}px).")
                 return 0, vy, self.output_width, vh, template_path
 
             # 2. Check for solid blue/colored placeholder area in the middle (user's template)
@@ -696,7 +690,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                 scaled_img.paste(transparent_box, (0, vy))
                 scaled_img.save(processed_tpl_path, "PNG")
 
-                self.logger.info(f"[Composer] Detected blue template viewport: Y={vy} to {vy + vh} (Height: {vh}px). Generated transparent overlay: {processed_tpl_path}")
+                self.logger.debug(f"[Composer] Detected blue template viewport: Y={vy} to {vy + vh} (Height: {vh}px).")
                 return 0, vy, self.output_width, vh, processed_tpl_path
 
         except Exception as e:
@@ -786,18 +780,15 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
             sub_clip_start = 0.0 if is_pre_cut else start_sec
 
-            print(f"[Composer Subtitle Mapping] Clip duration: {duration_sec:.1f}s | Words received: {len(aligned_words)} | sub_clip_start: {sub_clip_start:.2f}s | Language: '{language}'")
-
             # 4. Conditional Pipeline Routing
             if is_urdu:
                 # Route Urdu text to Headless Chrome (Playwright) + MoviePy Compositing
                 route_to_chrome_moviepy = True
-                self.logger.info("[Composer] 🌐 Language is 'Urdu': Routing captions to Headless Chrome (Playwright) + MoviePy engine.")
+                self.logger.info("[Composer] 🌐 Language is 'Urdu': Routing captions to Headless Chrome + MoviePy engine.")
             else:
                 # Standard Subtitle Pipeline for non-Urdu languages
                 ass_path = output_mp4_path.replace(".mp4", "_sub.ass")
                 font_family_name, fonts_dir, resolved_font_path = resolve_caption_font(caption_font, language)
-                print(f"[Composer Font Resolution] Language: '{language}' | Font: '{caption_font}' -> Family: '{font_family_name}' | Path: {resolved_font_path} | fontsdir: {fonts_dir}")
 
                 self.generate_ass_subtitles(
                     words=aligned_words,
@@ -818,7 +809,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         else:
             sub_filter = f";{target_in}copy[outv]"
 
-        self.logger.info(f"[Composer] Multi-thread rendering Short (Viewport: {vw}x{vh}, HasTemplate: {has_template}, Face-Track: {enable_face_tracking}, Captions: {enable_captions}, Pre-cut: {is_pre_cut}, Lang: {language})...")
+        self.logger.info(f"🎨 [Composer] Rendering 9:16 Short (FFmpeg GPU, Lang: {language})...")
 
         # Build FFmpeg filter complex:
         if has_template:
@@ -857,11 +848,11 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         if route_to_chrome_moviepy:
             if os.path.exists(temp_base_mp4) and os.path.getsize(temp_base_mp4) > 10000:
                 skip_ffmpeg = True
-                self.logger.info(f"[Composer] Framed base video already exists ({temp_base_mp4}). Skipping FFmpeg pre-render.")
+                self.logger.debug(f"[Composer] Framed base video already exists ({temp_base_mp4}). Skipping FFmpeg pre-render.")
             elif os.path.exists(output_mp4_path) and not os.path.exists(source_video_path) and not os.path.exists(urdu_marker):
                 os.replace(output_mp4_path, temp_base_mp4)
                 skip_ffmpeg = True
-                self.logger.info(f"[Composer] Repurposing existing base video ({output_mp4_path} -> {temp_base_mp4}) for MoviePy compositing.")
+                self.logger.debug(f"[Composer] Repurposing existing base video for MoviePy compositing.")
 
         if not skip_ffmpeg:
             ffmpeg_cmd = [
@@ -884,7 +875,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                 temp_base_mp4
             ])
 
-            self.logger.info(f"[Composer] Executing multi-threaded FFmpeg rendering command...")
+            self.logger.debug(f"[Composer] Executing multi-threaded FFmpeg rendering command...")
 
             process = subprocess.Popen(
                 ffmpeg_cmd,
@@ -968,5 +959,5 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                         os.remove(output_mp4_path)
                     os.replace(temp_base_mp4, output_mp4_path)
 
-        self.logger.info(f"[Composer] 9:16 Short render successful! Saved to: {output_mp4_path}")
+        self.logger.info(f"✅ [Composer] 9:16 Short render successful: {os.path.basename(output_mp4_path)}")
         return output_mp4_path

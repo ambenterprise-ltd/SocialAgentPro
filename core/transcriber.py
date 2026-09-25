@@ -88,7 +88,7 @@ class WhisperTranscriber:
         """
         try:
             lang_code = resolve_language_code(target_language)
-            self.logger.info(f"[FastTranscriber] Attempting native YouTube transcript fetch for '{video_id}' (target_language='{target_language}', code='{lang_code}')...")
+            self.logger.debug(f"[FastTranscriber] Fetching transcript for '{video_id}' (lang='{target_language}')...")
             raw_transcript = None
             detected_lang = lang_code
 
@@ -113,16 +113,16 @@ class WhisperTranscriber:
                 try:
                     t_list = ytt.list(video_id)
                 except TranscriptsDisabled:
-                    self.logger.warning(f"[FastTranscriber] Transcripts are disabled for video '{video_id}'. Skipping...")
+                    self.logger.debug(f"[FastTranscriber] Transcripts disabled for video '{video_id}'.")
                     return None
                 except VideoUnavailable:
-                    self.logger.warning(f"[FastTranscriber] Video '{video_id}' is unavailable, private, or removed. Skipping...")
+                    self.logger.debug(f"[FastTranscriber] Video '{video_id}' is unavailable or private.")
                     return None
                 except NoTranscriptFound:
-                    self.logger.warning(f"[FastTranscriber] No transcripts found on YouTube for video '{video_id}'. Skipping...")
+                    self.logger.debug(f"[FastTranscriber] No transcripts found on YouTube for '{video_id}'.")
                     return None
                 except Exception as e_list:
-                    self.logger.warning(f"[FastTranscriber] Transcript listing not available for '{video_id}': {e_list}. Skipping...")
+                    self.logger.debug(f"[FastTranscriber] Transcript listing error for '{video_id}': {e_list}")
                     return None
 
                 t_obj = None
@@ -143,7 +143,7 @@ class WhisperTranscriber:
 
                 if not t_obj:
                     avail_langs = [t.language_code for t in t_list]
-                    self.logger.info(f"[FastTranscriber] No native transcript found in {target_codes} for '{video_id}'. (Available languages: {avail_langs}).")
+                    self.logger.debug(f"[FastTranscriber] No native transcript found in {target_codes} for '{video_id}'. (Available: {avail_langs})")
                     return None
 
                 try:
@@ -151,13 +151,13 @@ class WhisperTranscriber:
                     detected_lang = t_obj.language_code
                     is_gen = getattr(t_obj, 'is_generated', False)
                     gen_str = "auto-generated" if is_gen else "manually created"
-                    self.logger.info(f"[FastTranscriber] Found {gen_str} {target_language} transcript ({detected_lang}) for '{video_id}'.")
+                    self.logger.debug(f"[FastTranscriber] Found {gen_str} {target_language} transcript ({detected_lang}) for '{video_id}'.")
                 except (CouldNotRetrieveTranscript, YouTubeTranscriptApiException, Exception) as e_fetch:
-                    self.logger.warning(f"[FastTranscriber] Failed to fetch transcript data for '{video_id}': {e_fetch}")
+                    self.logger.debug(f"[FastTranscriber] Failed to fetch transcript data for '{video_id}': {e_fetch}")
                     return None
 
             except Exception as e_inner:
-                self.logger.warning(f"[FastTranscriber] Unexpected error fetching transcript for '{video_id}': {e_inner}")
+                self.logger.debug(f"[FastTranscriber] Error fetching transcript for '{video_id}': {e_inner}")
                 return None
 
             if not raw_transcript:
@@ -190,7 +190,7 @@ class WhisperTranscriber:
             if not words_list:
                 return None
 
-            self.logger.info(f"[FastTranscriber] Successfully fetched headless transcript ({len(words_list)} words, lang={detected_lang}) in milliseconds!")
+            self.logger.debug(f"[FastTranscriber] Headless transcript ready ({len(words_list)} words, lang={detected_lang}).")
             return {
                 "language": detected_lang,
                 "language_probability": 1.0,

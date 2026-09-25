@@ -82,7 +82,7 @@ class MediaIngestionEngine:
         if not base_url.endswith('/videos'):
             base_url += '/videos'
 
-        self.logger.info(f"[Ingestion] Ultra-fast flat scraping {limit} recent videos from: {base_url} (min_duration={min_duration}s)...")
+        self.logger.debug(f"[Ingestion] Flat scraping {limit} recent videos from: {base_url} (min_duration={min_duration}s)...")
 
         ydl_opts = {
             "quiet": True,
@@ -113,15 +113,15 @@ class MediaIngestionEngine:
 
             # Filter out YouTube Shorts by URL and hashtag
             if "/shorts/" in webpage_url.lower() or "/shorts/" in url.lower():
-                self.logger.info(f"[Ingestion] Excluding channel video '{title}' ({v_id}): YouTube Shorts URL.")
+                self.logger.debug(f"[Ingestion] Excluding channel video '{title}' ({v_id}): YouTube Shorts URL.")
                 continue
             if "#shorts" in title.lower() or "#short" in title.lower():
-                self.logger.info(f"[Ingestion] Excluding channel video '{title}' ({v_id}): #shorts hashtag.")
+                self.logger.debug(f"[Ingestion] Excluding channel video '{title}' ({v_id}): #shorts hashtag.")
                 continue
 
             # Filter out videos shorter than min_duration (if duration is known)
             if dur and 0 < dur < min_duration:
-                self.logger.info(f"[Ingestion] Excluding channel video '{title}' ({v_id}): duration {dur}s < {min_duration}s.")
+                self.logger.debug(f"[Ingestion] Excluding channel video '{title}' ({v_id}): duration {dur}s < {min_duration}s.")
                 continue
 
             videos.append({
@@ -132,7 +132,7 @@ class MediaIngestionEngine:
                 "view_count": entry.get("view_count", 0) or 0
             })
 
-        self.logger.info(f"[Ingestion] Extracted {len(videos)} valid long-form video candidates in seconds.")
+        self.logger.debug(f"[Ingestion] Extracted {len(videos)} valid long-form video candidates.")
         return videos
 
     def search_youtube_topic_podcasts(
@@ -178,7 +178,7 @@ class MediaIngestionEngine:
             if len(all_candidates) >= target_count:
                 break
 
-            self.logger.info(f"[Ingestion] Performing YouTube topic search for: '{query}' (limit={limit}, min_dur={min_duration}s, lang={language})...")
+            self.logger.debug(f"[Ingestion] Topic search for: '{query}' (limit={limit}, min_dur={min_duration}s)...")
             ydl_opts = {
                 "quiet": True,
                 "no_warnings": True,
@@ -206,26 +206,26 @@ class MediaIngestionEngine:
 
                     # Filter out YouTube Shorts by URL and hashtag
                     if "/shorts/" in webpage_url.lower() or "/shorts/" in url.lower():
-                        self.logger.info(f"[Ingestion] Excluding search candidate '{title}' ({v_id}): YouTube Shorts URL.")
+                        self.logger.debug(f"[Ingestion] Excluding candidate '{title}' ({v_id}): YouTube Shorts URL.")
                         continue
                     if "#shorts" in title.lower() or "#short" in title.lower():
-                        self.logger.info(f"[Ingestion] Excluding search candidate '{title}' ({v_id}): #shorts hashtag.")
+                        self.logger.debug(f"[Ingestion] Excluding candidate '{title}' ({v_id}): #shorts hashtag.")
                         continue
 
                     # Filter out short videos under min_duration (5 minutes)
                     if dur and 0 < dur < min_duration:
-                        self.logger.info(f"[Ingestion] Excluding search candidate '{title}' ({v_id}): duration {dur}s < {min_duration}s.")
+                        self.logger.debug(f"[Ingestion] Excluding candidate '{title}' ({v_id}): duration {dur}s < {min_duration}s.")
                         continue
 
                     # Filter out regional Hindi/Urdu videos when English is requested
                     if language == "en" and any(reg in title_lower for reg in regional_exclusions):
-                        self.logger.info(f"[Ingestion] Excluding regional Hindi/Urdu candidate '{title}' ({v_id}).")
+                        self.logger.debug(f"[Ingestion] Excluding regional candidate '{title}' ({v_id}).")
                         continue
 
                     # Apply negative filters / exclusions
                     if negative_filters and title:
                         if any(neg.lower() in title_lower for neg in negative_filters):
-                            self.logger.info(f"[Ingestion] Excluding search candidate '{title}' matching negative filter.")
+                            self.logger.debug(f"[Ingestion] Excluding candidate '{title}' matching negative filter.")
                             continue
 
                     seen_ids.add(v_id)
@@ -243,7 +243,7 @@ class MediaIngestionEngine:
             except Exception as e:
                 self.logger.warning(f"[Ingestion] Topic search query '{query}' failed: {e}. Trying next query...")
 
-        self.logger.info(f"[Ingestion] Total discovered candidates across queries: {len(all_candidates)} (Target: {target_count}).")
+        self.logger.debug(f"[Ingestion] Total discovered candidates across queries: {len(all_candidates)} (Target: {target_count}).")
         return all_candidates
 
     def auto_fetch_channel_video(

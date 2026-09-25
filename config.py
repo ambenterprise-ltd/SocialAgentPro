@@ -50,6 +50,10 @@ class ConfigManager:
         "upload_to_youtube",
         "upload_to_facebook",
         "upload_to_instagram",
+        "google_sheets_json_path",
+        "google_spreadsheet_id",
+        "google_sheet_url",
+        "enable_google_sheets_logging",
     }
 
     SUPPORTED_CAPTION_LANGUAGES: List[str] = [

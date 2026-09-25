@@ -230,10 +230,7 @@ class MultiAccountKeyPool:
         self.cooldowns: Dict[str, float] = {}  # key -> timestamp when cooldown expires
         self._rr_index: int = 0
 
-        masked_list = [f"Account #{i+1} ({self.mask_key(k)})" for i, k in enumerate(self.keys)]
-        self.logger.info(
-            f"[KeyPool] Multi-Account Load Balancer initialized with {len(self.keys)} distinct accounts: {', '.join(masked_list)}"
-        )
+        self.logger.debug(f"[KeyPool] Multi-Account Load Balancer initialized with {len(self.keys)} accounts.")
 
     @classmethod
     def _discover_keys(cls, api_keys: Optional[List[str]] = None, env_file_path: str = ".env") -> List[str]:
@@ -585,7 +582,7 @@ class ViralClipExtractor:
             client = Groq(api_key=current_key)
 
             try:
-                self.logger.info(
+                self.logger.debug(
                     f"[LLMBrain] Processing Chunk {chunk_index}/{total_chunks} (Attempt {attempt + 1}/{max_attempts}, Account #{key_num}: {masked_key})..."
                 )
                 if self.pacer:
@@ -600,7 +597,7 @@ class ViralClipExtractor:
                         {"role": "user", "content": user_prompt}
                     ],
                     temperature=0.3,
-                    max_tokens=3500,
+                    max_tokens=4500,
                     response_format={"type": "json_object"}
                 )
 
@@ -617,13 +614,13 @@ class ViralClipExtractor:
                         c["duration"] = dur
 
                         if dur < min_duration:
-                            self.logger.warning(
-                                f"[LLMBrain] Rejected clip '{c.get('title')}' in Chunk {chunk_index} - duration {dur}s is below dead minimum {min_duration}s."
+                            self.logger.debug(
+                                f"[LLMBrain] Rejected clip in Chunk {chunk_index} - duration {dur}s < {min_duration}s."
                             )
                             continue
                         if dur > max_duration:
-                            self.logger.warning(
-                                f"[LLMBrain] Rejected clip '{c.get('title')}' in Chunk {chunk_index} - duration {dur}s exceeds maximum {max_duration}s."
+                            self.logger.debug(
+                                f"[LLMBrain] Rejected clip in Chunk {chunk_index} - duration {dur}s > {max_duration}s."
                             )
                             continue
 
@@ -644,9 +641,9 @@ class ViralClipExtractor:
 
                         valid_chunk_clips.append(c)
                     except Exception as ce:
-                        self.logger.warning(f"[LLMBrain] Skipping invalid clip structure in Chunk {chunk_index}: {ce}")
+                        self.logger.debug(f"[LLMBrain] Skipping invalid clip in Chunk {chunk_index}: {ce}")
 
-                self.logger.info(f"[LLMBrain] Chunk {chunk_index}/{total_chunks} succeeded via Account #{key_num}! Extracted {len(valid_chunk_clips)} compliant clips.")
+                self.logger.debug(f"[LLMBrain] Chunk {chunk_index}/{total_chunks} extracted {len(valid_chunk_clips)} clips.")
                 return chunk_index, valid_chunk_clips, None
 
             except Exception as e:
@@ -666,8 +663,8 @@ class ViralClipExtractor:
                 if is_auth_error:
                     self.key_pool.mark_dead_key(current_key, reason=str(e))
                     failed_keys_for_chunk.add(current_key)
-                    self.logger.warning(
-                        f"[LLMBrain] Chunk {chunk_index} re-routing immediately away from dead Account #{key_num}..."
+                    self.logger.debug(
+                        f"[LLMBrain] Chunk {chunk_index} re-routing away from dead Account #{key_num}..."
                     )
                     # Re-route chunk immediately without consuming an attempt
                     continue
@@ -683,9 +680,8 @@ class ViralClipExtractor:
                     wait_time = self.key_pool.parse_retry_after(e, default_cooldown=10.0)
                     self.key_pool.mark_cooldown(current_key, wait_time)
                     failed_keys_for_chunk.add(current_key)
-                    self.logger.warning(
-                        f"[LLMBrain] Chunk {chunk_index} hit 429 Rate Limit on Account #{key_num}! "
-                        f"Instantly re-routing Chunk {chunk_index} to next available account in pool..."
+                    self.logger.debug(
+                        f"[LLMBrain] Chunk {chunk_index} 429 on Account #{key_num}. Re-routing..."
                     )
                     # DO NOT sleep or pause the whole batch! Instantly re-route to another key
                     continue
@@ -693,11 +689,12 @@ class ViralClipExtractor:
                 # 3. Other errors (e.g. network timeout, 500 error, malformed JSON)
                 attempt += 1
                 failed_keys_for_chunk.add(current_key)
-                self.logger.warning(
-                    f"[LLMBrain] Error in Chunk {chunk_index}/{total_chunks} (Attempt {attempt}/{max_attempts}, Account #{key_num}: {masked_key}): {e}"
+                is_tok = "max completion tokens" in err_str
+                short_err = "Token limit reached" if is_tok else str(e).split("\n")[0][:100]
+                self.logger.debug(
+                    f"[LLMBrain] Chunk {chunk_index}/{total_chunks} notice ({attempt}/{max_attempts}): {short_err}"
                 )
                 if attempt < max_attempts:
-                    self.logger.info(f"[LLMBrain] Retrying Chunk {chunk_index} with another account...")
                     time.sleep(1.0)
 
         # Retries exhausted - isolate failure
@@ -739,18 +736,16 @@ class ViralClipExtractor:
         max_timestamp = max_transcript_minutes * 60.0  # 1200.0 seconds
         capped_words = [w for w in words if w.get("start", 0.0) <= max_timestamp]
         if capped_words:
-            self.logger.info(
-                f"[LLMBrain] ⚡ Enforcing 20-Minute Rule: Filtered transcript from {len(words)} words "
-                f"down to {len(capped_words)} words (capped at {max_transcript_minutes:.0f}:00 / {max_timestamp:.1f}s)."
+            self.logger.debug(
+                f"[LLMBrain] ⚡ 20-Minute Rule: Filtered transcript from {len(words)} to {len(capped_words)} words."
             )
             words = capped_words
 
-        self.logger.info(f"[LLMBrain] Preparing transcript for Groq ({len(words)} words)...")
         formatted_transcript = self._prepare_transcript_summary(words)
 
         # Split transcript into safe chunks (~1200 words per chunk: ~4-5 chunks for 20 minutes)
         transcript_chunks = self._chunk_transcript(formatted_transcript, max_words_per_chunk=1200)
-        self.logger.info(f"[LLMBrain] Transcript split into {len(transcript_chunks)} chunks (~1200 words each, 20-min cap) for rapid parallel processing.")
+        self.logger.debug(f"[LLMBrain] Transcript split into {len(transcript_chunks)} chunks for parallel processing.")
 
         # Dynamically resolve channel context for tailored prompt instructions
         from config import ConfigManager
@@ -821,10 +816,7 @@ You MUST respond strictly with a valid JSON object following this exact schema:
         active_count = self.key_pool.total_active_keys()
         max_workers = min(active_count, total_chunks) if total_chunks > 0 else 1
 
-        self.logger.info(
-            f"[LLMBrain] Dispatching {total_chunks} chunks across {max_workers} concurrent workers "
-            f"at FULL SPEED (Load-balanced across {active_count} independent accounts)..."
-        )
+        self.logger.info(f"🧠 [Brain] Analyzing transcript with Groq AI ({len(words)} words, {total_chunks} chunks)...")
 
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             future_to_chunk = {
@@ -965,6 +957,6 @@ You MUST respond strictly with a valid JSON object:
 
             clip["aligned_words"] = clip_words
             enriched_clips.append(clip)
-            self.logger.info(f"[LLMBrain] Final Selected Clip #{clip.get('clip_index')}: '{clip.get('title')}' ({clip.get('duration')}s) | Start: {c_start}s, End: {c_end}s | Score: {clip.get('viral_score')}")
+            self.logger.info(f"✨ [Brain] Selected Viral Clip: '{clip.get('title')}' ({clip.get('duration')}s) [{c_start:.1f}s - {c_end:.1f}s]")
 
         return enriched_clips

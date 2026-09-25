@@ -186,9 +186,8 @@ class YouTubePublisher:
 
         file_size_mb = os.path.getsize(video_path) / (1024 * 1024)
         self.logger.info(
-            f"[Publisher] Uploading '{title}' ({file_size_mb:.2f} MB, privacy='{privacy_status}') to YouTube..."
+            f"📤 [Publisher] Uploading '{title}' ({file_size_mb:.1f} MB) to YouTube..."
         )
-        print(f"\n[YouTube Upload] Starting upload for '{title}' ({file_size_mb:.2f} MB)...")
 
         # 1MB chunk size for smooth progress tracking
         chunk_size = 1024 * 1024
@@ -208,17 +207,14 @@ class YouTubePublisher:
             if status:
                 pct = round(status.progress() * 100, 1)
                 int_pct = int(pct)
-                if int_pct != last_pct and int_pct % 5 == 0:
+                if progress_callback:
+                    progress_callback(pct, f"Uploading to YouTube: {pct:.1f}%")
+                if int_pct != last_pct and int_pct in (25, 50, 75, 100):
                     last_pct = int_pct
-                    msg = f"Uploading to YouTube: {pct:.1f}%"
-                    self.logger.info("[Publisher] %s", msg)
-                    print(f"[YouTube Upload] Progress: {pct:.1f}%")
-                    if progress_callback:
-                        progress_callback(pct, msg)
+                    self.logger.info(f"[Publisher] YouTube Upload: {pct:.0f}%")
 
         if progress_callback:
             progress_callback(100.0, "YouTube Upload Complete (100%)")
-        print("[YouTube Upload] Progress: 100.0% - Upload Complete!")
 
         video_id = response.get("id")
         if not video_id:
@@ -228,8 +224,7 @@ class YouTubePublisher:
             )
 
         video_url = f"https://www.youtube.com/watch?v={video_id}"
-        self.logger.info("[Publisher] Video uploaded successfully! URL: %s", video_url)
-        print(f"[YouTube Upload Success] Live URL: {video_url}\n")
+        self.logger.info("✅ [Publisher] YouTube Short published! Live URL: %s", video_url)
 
         return {
             "id": video_id,
@@ -314,9 +309,8 @@ class FacebookPublisher:
 
         file_size_mb = os.path.getsize(video_path) / (1024 * 1024)
         self.logger.info(
-            f"[Facebook Publisher] Uploading '{title}' ({file_size_mb:.2f} MB) to Facebook Page ({self.page_id})..."
+            f"📤 [Publisher] Uploading '{title}' ({file_size_mb:.1f} MB) to Facebook Page ({self.page_id})..."
         )
-        print(f"\n[Facebook Upload] Starting upload to Facebook Page ({self.page_id}) for '{title}' ({file_size_mb:.2f} MB)...")
 
         if progress_callback:
             progress_callback(10.0, "Initializing Facebook Reels Upload...")
@@ -341,7 +335,6 @@ class FacebookPublisher:
 
                 if progress_callback:
                     progress_callback(30.0, "Uploading video binary to Facebook Reels...")
-                print("[Facebook Upload] Uploading video data to Facebook...")
 
                 with open(video_path, "rb") as f:
                     up_headers = {
@@ -378,7 +371,6 @@ class FacebookPublisher:
         # Strategy 2: Direct Graph Video Upload (Fallback & Standard)
         if not video_id:
             try:
-                print("[Facebook Upload] Using direct Meta video publishing endpoint...")
                 if progress_callback:
                     progress_callback(40.0, "Uploading via Facebook direct video endpoint...")
                 direct_url = f"https://graph-video.facebook.com/v19.0/{self.page_id}/videos"
@@ -401,8 +393,7 @@ class FacebookPublisher:
             raise RuntimeError("[Facebook Publisher] Upload failed to return a valid Facebook video ID.")
 
         video_url = f"https://www.facebook.com/{video_id}"
-        self.logger.info("[Facebook Publisher] Reel published successfully! URL: %s", video_url)
-        print(f"[Facebook Upload Success] Published to Facebook! Live URL: {video_url}\n")
+        self.logger.info("✅ [Publisher] Facebook Reel published! Live URL: %s", video_url)
         if progress_callback:
             progress_callback(100.0, "Facebook Upload Complete (100%)")
 
@@ -444,9 +435,8 @@ class InstagramPublisher:
         file_size_mb = os.path.getsize(video_path) / (1024 * 1024)
         file_size = os.path.getsize(video_path)
         self.logger.info(
-            f"[Instagram Publisher] Uploading Reel ({file_size_mb:.2f} MB) to Instagram Account ({self.instagram_account_id})..."
+            f"📤 [Publisher] Uploading Reel ({file_size_mb:.1f} MB) to Instagram ({self.instagram_account_id})..."
         )
-        print(f"\n[Instagram Upload] Starting upload to Instagram ({self.instagram_account_id}) ({file_size_mb:.2f} MB)...")
 
         if progress_callback:
             progress_callback(10.0, "Initializing Instagram Reels Container...")
@@ -470,7 +460,6 @@ class InstagramPublisher:
         if not container_id or not rupload_uri:
             raise RuntimeError(f"[Instagram Publisher] Failed to obtain container ID or upload URI: {init_json}")
 
-        print(f"[Instagram Upload] Container created (ID: {container_id}). Uploading video binary...")
         if progress_callback:
             progress_callback(30.0, "Uploading video data to Instagram...")
 
@@ -486,7 +475,6 @@ class InstagramPublisher:
             if upload_resp.status_code not in (200, 201):
                 raise RuntimeError(f"Instagram Video Upload Error (HTTP {upload_resp.status_code}): {upload_resp.text}")
 
-        print("[Instagram Upload] Video uploaded. Waiting for Instagram media processing...")
         if progress_callback:
             progress_callback(65.0, "Waiting for Instagram media processing...")
 
@@ -508,14 +496,13 @@ class InstagramPublisher:
                 break
             elif code in ("ERROR", "EXPIRED"):
                 raise RuntimeError(f"Instagram media processing failed with status '{code}': {stat_json}")
-            self.logger.info("[Instagram Publisher] Media processing... (%s/20)", attempt + 1)
+            self.logger.debug("[Instagram Publisher] Media processing... (%s/20)", attempt + 1)
 
         if not is_ready:
             self.logger.warning("[Instagram Publisher] Container processing timed out. Attempting publish anyway...")
 
         if progress_callback:
             progress_callback(85.0, "Publishing Reel to Instagram...")
-        print("[Instagram Upload] Publishing container to Instagram feed...")
 
         # Step 4: Publish Container
         publish_url = f"https://graph.facebook.com/v19.0/{self.instagram_account_id}/media_publish"
@@ -546,8 +533,7 @@ class InstagramPublisher:
         except Exception:
             pass
 
-        self.logger.info("[Instagram Publisher] Reel published successfully! URL: %s", media_url)
-        print(f"[Instagram Upload Success] Published to Instagram! Live URL: {media_url}\n")
+        self.logger.info("✅ [Publisher] Instagram Reel published! Live URL: %s", media_url)
         if progress_callback:
             progress_callback(100.0, "Instagram Upload Complete (100%)")
 

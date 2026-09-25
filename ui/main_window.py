@@ -11,8 +11,11 @@ from tkinter import messagebox
 
 from config import ConfigManager
 from ui.admin_modal import AdminPasswordDialog, AdminSettingsModal
+from ui.precheck_modal import SystemPrecheckModal
 from core.pipeline import ShortsAutomationPipeline
 from core.publisher import MultiPlatformPublisher, YouTubePublisher
+from core.precheck import SystemPrechecker
+from core.sheets_logger import GoogleSheetsLogger
 
 # Configure CustomTkinter dark theme defaults
 ctk.set_appearance_mode("Dark")
@@ -137,7 +140,20 @@ class MainWindow(ctk.CTk):
             font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
             command=self._on_admin_click
         )
-        self.admin_btn.pack(side="right", padx=(10, 20), pady=15)
+        self.admin_btn.pack(side="right", padx=(5, 20), pady=15)
+
+        self.precheck_btn = ctk.CTkButton(
+            header_frame,
+            text="🩺 Pre-Check",
+            width=115,
+            corner_radius=4,
+            fg_color="#238636",
+            hover_color="#2ea043",
+            text_color="#FFFFFF",
+            font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
+            command=self._open_system_precheck
+        )
+        self.precheck_btn.pack(side="right", padx=(5, 5), pady=15)
 
         self.status_badge = ctk.CTkLabel(
             header_frame,
@@ -728,6 +744,11 @@ class MainWindow(ctk.CTk):
 
         AdminPasswordDialog(self, self.config_manager, on_success_callback=open_admin)
 
+    def _open_system_precheck(self):
+        """Opens the System Diagnostics & Health Pre-Check Modal."""
+        active_prof = self.config_manager.get_active_profile_name()
+        SystemPrecheckModal(self, self.config_manager, channel_name=active_prof)
+
     def _process_log_queue(self):
         """
         Consumes messages from log_queue and writes them to CTkTextbox / updates progress bar.
@@ -819,11 +840,31 @@ class MainWindow(ctk.CTk):
         active_prof = target_profile or self.config_manager.get_active_profile_name()
         url = self.url_entry.get().strip()
 
+        # System Pre-Check validation: Verify vital dependencies & configurations before start
+        try:
+            prechecker = SystemPrechecker(self.config_manager, active_prof, logger=self.logger)
+            has_crit, crit_issues = prechecker.has_critical_failures()
+            if has_crit:
+                crit_list = "\n".join([f"• {issue.name}: {issue.details}" for issue in crit_issues])
+                self.logger.error(f"[Pre-Check] Pipeline start aborted due to critical failure(s):\n{crit_list}")
+                open_diag = messagebox.askyesno(
+                    "System Pre-Check Alert",
+                    f"Cannot start processing for '{active_prof}' because critical dependencies failed:\n\n{crit_list}\n\n"
+                    f"Would you like to open the System Diagnostics Pre-Check modal to review details?"
+                )
+                if open_diag:
+                    self._open_system_precheck()
+                return
+        except Exception as p_err:
+            self.logger.warning(f"[Pre-Check] Pre-check scan encountered an error (proceeding): {p_err}")
+
         self.stop_requested = False
         self.start_btn.configure(state="disabled")
         self.stop_btn.configure(state="normal")
         self.manual_upload_btn.configure(state="disabled")
         self.admin_btn.configure(state="disabled")
+        if hasattr(self, "precheck_btn"):
+            self.precheck_btn.configure(state="disabled")
         self.autofetch_btn.configure(state="disabled")
         self.status_badge.configure(text=" PROCESSING ", fg_color="#D4C5B0", text_color="#0B0C0E")
 
@@ -832,7 +873,7 @@ class MainWindow(ctk.CTk):
 
         topic = self.topic_entry.get().strip() or self.config_manager.get_channel_setting("topic_focus", "", active_prof)
         lang = self.language_var.get().strip() if hasattr(self, "language_var") else self.config_manager.get_language(active_prof)
-        self.logger.info(f"Initiating 1 Short Generation cycle for Channel Profile: '{active_prof}' (Language: '{lang}')...")
+        self.logger.debug(f"[Worker] Initiating generation cycle for '{active_prof}' ({lang})...")
 
         # Spawn background processing thread
         self.worker_thread = threading.Thread(
@@ -868,7 +909,7 @@ class MainWindow(ctk.CTk):
             )
 
             if results:
-                self.logger.info(f"[Worker] Single Short generated successfully for '{profile_name}': {results[0].get('rendered_mp4_path')}")
+                self.logger.debug(f"[Worker] Short complete for '{profile_name}'.")
                 self._reset_ui_state(success=True)
             else:
                 self._reset_ui_state(success=False)
@@ -973,6 +1014,34 @@ class MainWindow(ctk.CTk):
                 self.logger.info(f"[Manual Upload] Successfully published to: {platforms_str}!")
                 print(f"\n[Multi-Platform Success] Successfully published for '{profile_name}': {platforms_str}\n")
 
+                # Asynchronous Google Sheets Logging
+                try:
+                    details = upload_res.get("details", {})
+                    yt_url = details.get("youtube", {}).get("video_url", "")
+                    fb_url = details.get("facebook", {}).get("reel_url", "")
+                    ig_url = details.get("instagram", {}).get("reel_url", "")
+
+                    last_run_ts = self.config_manager.get_channel_setting("last_autopilot_run", 0, profile_name)
+                    next_run_ts = self.config_manager.get_channel_setting("next_autopilot_run", 0, profile_name)
+                    last_str = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(last_run_ts)) if last_run_ts else "N/A"
+                    next_str = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(next_run_ts)) if next_run_ts else "N/A"
+
+                    sheets_logger = GoogleSheetsLogger(self.config_manager, profile_name, logger=self.logger)
+                    sheets_logger.log_video_upload_async(
+                        channel_name=profile_name,
+                        video_title=clip_title,
+                        duration=0.0,
+                        platforms=platforms_list,
+                        youtube_url=yt_url,
+                        facebook_url=fb_url,
+                        instagram_url=ig_url,
+                        last_video_ts=last_str,
+                        next_video_ts=next_str,
+                        status="Success"
+                    )
+                except Exception as ex:
+                    self.logger.warning(f"[Manual Upload] Google Sheets logging skipped: {ex}")
+
                 # Schedule deletion in 1 hour
                 self.logger.info("[Manual Upload] Clip scheduled for automatic local deletion in 1 hour (record kept permanently).")
                 self.config_manager.schedule_file_deletion(target_mp4, delay_seconds=3600, clip_id=f"manual_{profile_name}")
@@ -999,6 +1068,8 @@ class MainWindow(ctk.CTk):
             self.stop_btn.configure(state="disabled")
             self.manual_upload_btn.configure(state="normal")
             self.admin_btn.configure(state="normal")
+            if hasattr(self, "precheck_btn"):
+                self.precheck_btn.configure(state="normal")
             self.autofetch_btn.configure(state="normal")
             if success:
                 self.status_badge.configure(text=" READY ", fg_color="#00A8B5", text_color="#FFFFFF")
