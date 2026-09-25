@@ -514,6 +514,47 @@ class ShortsAutomationPipeline:
                     break
 
             if not video_id or not transcript_data:
+                # Robust Fallback: If cloud IP blocks all headless transcripts or videos lack captions,
+                # pick the highest-ranked candidate and transcribe via audio + Groq Whisper
+                fallback_pool = []
+                if 'topic_candidates' in locals() and topic_candidates:
+                    fallback_pool = topic_candidates
+                elif unprocessed:
+                    fallback_pool = unprocessed
+                elif candidates:
+                    fallback_pool = candidates
+
+                if fallback_pool:
+                    top_cand = fallback_pool[0]
+                    cand_id = top_cand.get("id")
+                    cand_url = top_cand.get("url") or f"https://www.youtube.com/watch?v={cand_id}"
+                    cand_title = top_cand.get("title", cand_id)
+
+                    self.logger.info(
+                        f"⚡ [Discovery] Headless transcripts unavailable on network for candidate pool. "
+                        f"Falling back to audio download + Groq Whisper for top candidate: '{cand_title}' ({cand_id})..."
+                    )
+                    cache_suffix = f"_{lang_code}" if lang_code != "en" else ""
+                    cache_json = os.path.join(transcripts_dir, f"{cand_id}{cache_suffix}_transcript.json")
+                    key_pool = self.config_manager.get_api_key_pool(chan_name)
+                    try:
+                        audio_info = ingestion.download_and_extract_audio(cand_url, target_height=360)
+                        t_data = transcriber.transcribe(
+                            audio_info["audio_path"],
+                            cache_json_path=cache_json,
+                            api_key=key_pool,
+                            language=lang_code
+                        )
+                        if t_data and t_data.get("words"):
+                            video_id = cand_id
+                            target_url = cand_url
+                            video_title = cand_title
+                            transcript_data = t_data
+                            self.logger.info(f"📺 [Discovery] Audio Whisper transcription succeeded! Locked onto: '{video_title}' ({video_id})")
+                    except Exception as we:
+                        self.logger.error(f"[Pipeline] Audio Whisper fallback failed for '{cand_id}': {we}")
+
+            if not video_id or not transcript_data:
                 raise ValueError(
                     f"Could not find any available video with a valid transcript matching topic '{topic}'. "
                     f"Tested and exhausted candidates in search pool."

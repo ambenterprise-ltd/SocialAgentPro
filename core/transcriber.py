@@ -161,7 +161,7 @@ class WhisperTranscriber:
                 return None
 
             if not raw_transcript:
-                return None
+                return self._fetch_ytdlp_native(video_id, target_language)
 
             words_list = []
             full_text = []
@@ -188,7 +188,7 @@ class WhisperTranscriber:
                 words_list.extend(self._interpolate_words(text, start, end))
 
             if not words_list:
-                return None
+                return self._fetch_ytdlp_native(video_id, target_language)
 
             self.logger.debug(f"[FastTranscriber] Headless transcript ready ({len(words_list)} words, lang={detected_lang}).")
             return {
@@ -199,7 +199,156 @@ class WhisperTranscriber:
                 "words": words_list
             }
         except Exception as e:
-            self.logger.warning(f"[FastTranscriber] Native YouTube transcript not available for '{video_id}': {e}")
+            self.logger.debug(f"[FastTranscriber] Native YouTube API transcript failed for '{video_id}': {e}. Trying yt-dlp fallback...")
+            return self._fetch_ytdlp_native(video_id, target_language)
+
+    def _fetch_ytdlp_native(self, video_id: str, target_language: str = "en") -> Optional[Dict[str, Any]]:
+        """
+        Headless fallback using yt-dlp subtitle metadata and signed timedtext URLs.
+        Bypasses cloud IP / datacenter blocks on YouTube's public timedtext endpoint.
+        """
+        try:
+            import yt_dlp
+            import urllib.request
+            import re
+
+            lang_code = resolve_language_code(target_language)
+            ydl_opts = {
+                "skip_download": True,
+                "quiet": True,
+                "no_warnings": True,
+                "extract_flat": False,
+            }
+            url = f"https://www.youtube.com/watch?v={video_id}"
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+                if not info:
+                    return None
+
+            subtitles = info.get("subtitles") or {}
+            auto_captions = info.get("automatic_captions") or {}
+
+            # Priority order for dialects
+            dialect_candidates = [lang_code]
+            if lang_code == "en":
+                dialect_candidates.extend(["en-US", "en-GB", "en-CA", "en-AU", "en-IN"])
+            elif lang_code == "es":
+                dialect_candidates.extend(["es-ES", "es-419", "es-MX", "es-US"])
+
+            selected_caps = None
+            detected_lang = lang_code
+
+            # Check manual subtitles first, then automatic captions
+            for pool in (subtitles, auto_captions):
+                for candidate in dialect_candidates:
+                    if candidate in pool and pool[candidate]:
+                        selected_caps = pool[candidate]
+                        detected_lang = candidate
+                        break
+                if selected_caps:
+                    break
+
+            if not selected_caps:
+                # Prefix match
+                for pool in (subtitles, auto_captions):
+                    for k, val in pool.items():
+                        if k.lower().startswith(lang_code.lower()) and val:
+                            selected_caps = val
+                            detected_lang = k
+                            break
+                    if selected_caps:
+                        break
+
+            if not selected_caps:
+                return None
+
+            # Look for json3 or vtt
+            json3_obj = next((x for x in selected_caps if x.get("ext") == "json3"), None)
+            target_url = json3_obj["url"] if json3_obj else None
+
+            if not target_url:
+                vtt_obj = next((x for x in selected_caps if x.get("ext") == "vtt"), None)
+                target_url = vtt_obj["url"] if vtt_obj else (selected_caps[0].get("url") if selected_caps else None)
+
+            if not target_url:
+                return None
+
+            req = urllib.request.Request(
+                target_url,
+                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
+            )
+            raw_bytes = urllib.request.urlopen(req, timeout=12).read()
+            raw_str = raw_bytes.decode("utf-8", errors="replace")
+
+            words_list = []
+            full_text = []
+
+            if json3_obj:
+                data = json.loads(raw_str)
+                events = data.get("events", [])
+                for ev in events:
+                    if "segs" not in ev:
+                        continue
+                    ev_start = float(ev.get("tStartMs", 0.0)) / 1000.0
+                    ev_dur = float(ev.get("dDurationMs", 0.0)) / 1000.0
+                    ev_end = ev_start + ev_dur
+
+                    seg_text = "".join(s.get("utf8", "") for s in ev.get("segs", [])).replace("\n", " ").strip()
+                    if not seg_text:
+                        continue
+                    full_text.append(seg_text)
+
+                    # Check if word-level offsets exist in segs
+                    has_offsets = any("tOffsetMs" in s for s in ev.get("segs", []))
+                    if has_offsets:
+                        for s in ev.get("segs", []):
+                            w_text = s.get("utf8", "").strip()
+                            if not w_text:
+                                continue
+                            offset_sec = float(s.get("tOffsetMs", 0.0)) / 1000.0
+                            w_start = ev_start + offset_sec
+                            words_list.append({
+                                "word": w_text,
+                                "start": round(w_start, 3),
+                                "end": round(min(w_start + 0.35, ev_end), 3),
+                                "probability": 1.0
+                            })
+                    else:
+                        words_list.extend(self._interpolate_words(seg_text, ev_start, ev_end))
+            else:
+                blocks = raw_str.split("\n\n")
+                for block in blocks:
+                    lines = [ln.strip() for ln in block.split("\n") if ln.strip()]
+                    for i_ln, ln in enumerate(lines):
+                        time_match = re.search(r"(\d{2}:\d{2}:\d{2}[\.,]\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2}[\.,]\d{3})", ln)
+                        if time_match:
+                            def parse_time(ts_str):
+                                parts = ts_str.replace(",", ".").split(":")
+                                return float(parts[0]) * 3600 + float(parts[1]) * 60 + float(parts[2])
+                            try:
+                                s_time = parse_time(time_match.group(1))
+                                e_time = parse_time(time_match.group(2))
+                                txt = " ".join(lines[i_ln+1:])
+                                txt = re.sub(r"<[^>]+>", "", txt).strip()
+                                if txt:
+                                    full_text.append(txt)
+                                    words_list.extend(self._interpolate_words(txt, s_time, e_time))
+                            except Exception:
+                                pass
+
+            if not words_list:
+                return None
+
+            self.logger.info(f"⚡ [FastTranscriber] Headless yt-dlp transcript extracted successfully ({len(words_list)} words, lang='{detected_lang}').")
+            return {
+                "language": detected_lang,
+                "language_probability": 1.0,
+                "duration": words_list[-1]["end"] if words_list else 0,
+                "full_text": " ".join(full_text),
+                "words": words_list
+            }
+        except Exception as e_yt:
+            self.logger.debug(f"[FastTranscriber] yt-dlp transcript extraction failed for '{video_id}': {e_yt}")
             return None
 
     def fetch_headless_transcript(self, video_id: str, cache_json_path: Optional[str] = None, language: str = "en") -> Optional[Dict[str, Any]]:
