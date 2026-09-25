@@ -21,8 +21,6 @@ class ConfigManager:
     """
 
     CHANNEL_SPECIFIC_KEYS = {
-        "groq_api_key",
-        "groq_api_keys_pool",
         "youtube_oauth_json_path",
         "template_path",
         "resolution_preset",
@@ -42,6 +40,16 @@ class ConfigManager:
         "last_generated_clip",
         "generated_clips_history",
         "processed_video_ids",
+        "youtube_privacy_status",
+        "next_autopilot_run",
+        "meta_access_token",
+        "facebook_access_token",
+        "facebook_page_id",
+        "instagram_access_token",
+        "instagram_account_id",
+        "upload_to_youtube",
+        "upload_to_facebook",
+        "upload_to_instagram",
     }
 
     SUPPORTED_CAPTION_LANGUAGES: List[str] = [
@@ -59,6 +67,125 @@ class ConfigManager:
         "Calibri",
         "Segoe UI"
     ]
+
+    CHANNEL_CONTEXTS: Dict[str, Dict[str, Any]] = {
+        "Wealth Secrets": {
+            "channel_name": "Wealth Secrets",
+            "content_type": "podcast",
+            "template_path": "assets/wealth secret template (2).jpg",
+            "template_filename": "wealth secret template (2).jpg",
+            "topic_focus": "wealth, business secrets, and money concepts",
+            "niche_name": "Business & Wealth Podcast",
+            "system_instruction": (
+                "You are an expert podcast analyst and video curator specializing in wealth creation, "
+                "business strategy, financial mindset, and investment insights."
+            ),
+            "content_focus_description": "wealth, business principles, investing wisdom, and financial mindset",
+            "language": "English",
+            "caption_language": "English",
+            "caption_font": "Arial Black",
+            "auto_search_keywords": [
+                "wealth secrets American podcast interview US",
+                "business advice American podcast interview US",
+                "how to build wealth American podcast interview US",
+                "money mindset American podcast interview US"
+            ],
+            "negative_filters": [
+                "hindi",
+                "urdu",
+                "ankur warikoo",
+                "warikoo",
+                "raj shamani",
+                "ranveer",
+                "tanmay",
+                "marwari",
+                "crorepati",
+                "indian",
+                "india"
+            ]
+        },
+        "Khao Pakistan": {
+            "channel_name": "Khao Pakistan",
+            "content_type": "food vlog",
+            "template_path": "assets/khao pakistan template.jpg",
+            "template_filename": "khao pakistan template.jpg",
+            "topic_focus": "food reviews, traditional Pakistani food, and restaurant vlogging",
+            "niche_name": "Pakistani Food & Restaurant Reviews",
+            "system_instruction": (
+                "You are an expert culinary critic, food review curator, and vlogging analyst specializing in "
+                "traditional Pakistani food, street food culture, restaurant reviews, and authentic desi cuisine."
+            ),
+            "content_focus_description": "food reviews, traditional Pakistani dishes, restaurant vlogs, taste tests, and culinary culture",
+            "auto_search_keywords": [
+                "Pakistani food vlog",
+                "Khao Pakistan food review",
+                "street food Pakistan",
+                "desi food recipes vlog"
+            ]
+        },
+        "Nutrilogic Way": {
+            "channel_name": "Nutrilogic Way",
+            "content_type": "supplement review",
+            "template_path": "assets/nutrilogic way template.jpg",
+            "template_filename": "nutrilogic way template.jpg",
+            "topic_focus": "hardcore bodybuilding supplement breakdowns, pre-workout and creatine tier lists, whey protein gains, high-energy gym motivation",
+            "niche_name": "Hardcore Gym Supplements & Bodybuilding",
+            "system_instruction": (
+                "You are an elite, high-energy, hardcore gym-bro coach and supplement curator with intense, raw, "
+                "punchy, and motivational energy (in the style of the Tren Twins, Larry Wheels, and relentless lifting intensity). "
+                "YOUR FORMAT & HOOK RULE: You must hook the viewer immediately in the first 2 seconds (e.g., calling out weak "
+                "underdosed pre-workouts, dry scooping myths, lethal pumps, or non-negotiable supplements for pure unadulterated mass). "
+                "STRICT FORBIDDEN CONTENT RULE: Strictly forbid boring textbook explanations of bodily functions, dietary fiber, "
+                "balanced food pyramids, or clinical digestion charts. Keep the clip laser-focused on maximum gym performance, explosive muscle "
+                "growth, lifting heavy iron, PRs, and no-BS supplement truth."
+            ),
+            "content_focus_description": "hardcore bodybuilding supplements, pre-workout energy, creatine tier lists, whey protein gains, and intense gym motivation",
+            "auto_search_keywords": [
+                "gym supplement tier list",
+                "bodybuilding motivation raw",
+                "pre workout energy gym edit",
+                "whey protein breakdown fitness",
+                "creatine gym transformation"
+            ],
+            "negative_filters": [
+                "balanced diet",
+                "vitamins digestion",
+                "organic vegetables",
+                "gut health",
+                "clinical nutrition"
+            ],
+            "visual_tags": [
+                "heavy lifting",
+                "gym barbell",
+                "shaker cup",
+                "dumbbell press",
+                "intense workout edit"
+            ],
+            "excluded_visual_tags": [
+                "fruits",
+                "vegetables",
+                "digestion diagram",
+                "water bottle"
+            ]
+        }
+    }
+
+    @classmethod
+    def get_channel_context(cls, channel_name: str) -> Dict[str, Any]:
+        """Returns the context dictionary for a specific channel name with smart fallback."""
+        if not channel_name:
+            return cls.CHANNEL_CONTEXTS["Wealth Secrets"]
+        if channel_name in cls.CHANNEL_CONTEXTS:
+            return cls.CHANNEL_CONTEXTS[channel_name]
+        c_lower = str(channel_name).lower()
+        for k, v in cls.CHANNEL_CONTEXTS.items():
+            if k.lower() in c_lower or c_lower in k.lower():
+                return v
+        if "khao" in c_lower or "food" in c_lower:
+            return cls.CHANNEL_CONTEXTS["Khao Pakistan"]
+        if "nutri" in c_lower or "health" in c_lower or "gym" in c_lower:
+            return cls.CHANNEL_CONTEXTS["Nutrilogic Way"]
+        return cls.CHANNEL_CONTEXTS["Wealth Secrets"]
 
     LANGUAGE_TO_CODE: Dict[str, str] = {
         "english": "en",
@@ -126,32 +253,127 @@ class ConfigManager:
         """Utility to generate SHA-256 hash for admin passwords."""
         return hashlib.sha256(password.encode("utf-8")).hexdigest()
 
+    def get_shared_groq_api_key(self) -> str:
+        """Returns the shared primary Groq API key across all channels."""
+        key = str(self._config.get("groq_api_key") or "").strip()
+        if key:
+            return key
+        for prof in self._config.get("profiles", {}).values():
+            k = str(prof.get("groq_api_key") or "").strip()
+            if k:
+                self._config["groq_api_key"] = k
+                return k
+        return ""
+
+    def get_shared_groq_keys_pool(self) -> List[str]:
+        """Returns the shared Groq API keys pool across all channels."""
+        pool = self._config.get("groq_api_keys_pool", [])
+        if pool and isinstance(pool, list):
+            clean = [str(k).strip() for k in pool if str(k).strip()]
+            if clean:
+                return clean
+        for prof in self._config.get("profiles", {}).values():
+            p = prof.get("groq_api_keys_pool", [])
+            if p and isinstance(p, list) and len(p) > 0:
+                clean_p = [str(k).strip() for k in p if str(k).strip()]
+                if clean_p:
+                    self._config["groq_api_keys_pool"] = clean_p
+                    return clean_p
+        return []
+
+    def set_shared_groq_keys(self, primary_key: str, pool_keys: List[str]) -> None:
+        """Saves the shared Groq API keys globally and propagates to all profiles."""
+        clean_primary = (primary_key or "").strip()
+        clean_pool = [str(k).strip() for k in pool_keys if k and str(k).strip()]
+
+        self._config["groq_api_key"] = clean_primary
+        self._config["groq_api_keys_pool"] = clean_pool
+
+        for prof_dict in self._config.get("profiles", {}).values():
+            prof_dict["groq_api_key"] = clean_primary
+            prof_dict["groq_api_keys_pool"] = list(clean_pool)
+
+        self.save_config()
+
+    @classmethod
+    def resolve_asset_path(cls, path: str) -> str:
+        """Resolves relative or filename paths against project assets directory."""
+        if not path:
+            return ""
+        if os.path.isabs(path) and os.path.exists(path):
+            return path
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        candidates = [
+            os.path.join(base_dir, path),
+            os.path.join(base_dir, "assets", os.path.basename(path)),
+            os.path.join(os.getcwd(), path),
+            os.path.join(os.getcwd(), "assets", os.path.basename(path))
+        ]
+        for c in candidates:
+            if os.path.exists(c):
+                return os.path.abspath(c)
+        return path
+
+    def get_template_path(self, profile_name: Optional[str] = None) -> str:
+        """Returns the configured or default template path for the specified channel profile."""
+        prof_name = profile_name or self.get_active_profile_name()
+        ctx = self.get_channel_context(prof_name)
+        default_tpl = ctx.get("template_path", "assets/wealth secret template (2).jpg")
+
+        tpl = self.get_channel_setting("template_path", default_tpl, prof_name)
+        legacy_patterns = ["wealth_secrets_template.png", "wealth secrets.png", "template.png"]
+        if not tpl or any(lp in str(tpl).lower() for lp in legacy_patterns):
+            tpl = default_tpl
+
+        resolved = self.resolve_asset_path(tpl)
+        if os.path.exists(resolved):
+            return resolved
+
+        default_resolved = self.resolve_asset_path(default_tpl)
+        if os.path.exists(default_resolved):
+            return default_resolved
+
+        return resolved or tpl
+
+    def get_negative_filters(self, profile_name: Optional[str] = None) -> List[str]:
+        """Returns list of negative keyword exclusions for the channel profile."""
+        prof_name = profile_name or self.get_active_profile_name()
+        ctx = self.get_channel_context(prof_name)
+        default_negs = ctx.get("negative_filters", [])
+        return self.get_channel_setting("negative_filters", default_negs, prof_name) or default_negs
+
+    def get_visual_tags(self, profile_name: Optional[str] = None) -> Tuple[List[str], List[str]]:
+        """Returns (visual_tags, excluded_visual_tags) for the channel profile."""
+        prof_name = profile_name or self.get_active_profile_name()
+        ctx = self.get_channel_context(prof_name)
+        tags = ctx.get("visual_tags", [])
+        excluded = ctx.get("excluded_visual_tags", [])
+        return tags, excluded
+
     def get_default_channel_profile(self, name: str = "Wealth Secrets") -> Dict[str, Any]:
         """Returns standard configuration dictionary for a single channel profile."""
-        tpl_path = os.path.join("assets", "wealth_secrets_template.png")
-        if not os.path.exists(os.path.join(os.path.dirname(os.path.abspath(__file__)), tpl_path)):
-            tpl_path = os.path.join("assets", "template.png")
+        ctx = self.get_channel_context(name)
+        topic_focus = ctx.get("topic_focus", "wealth, business secrets, and money concepts")
+        auto_kws = ctx.get("auto_search_keywords", [])
+        tpl_path = ctx.get("template_path", "assets/wealth secret template (2).jpg")
+        negative_filters = ctx.get("negative_filters", [])
 
         return {
             "channel_name": name,
-            "groq_api_key": "",
-            "groq_api_keys_pool": [],
+            "groq_api_key": self.get_shared_groq_api_key(),
+            "groq_api_keys_pool": self.get_shared_groq_keys_pool(),
             "youtube_oauth_json_path": "",
             "template_path": tpl_path,
             "resolution_preset": "1080x1920 (9:16 Vertical Shorts)",
             "resolution_width": 1080,
             "resolution_height": 1920,
-            "topic_focus": "wealth, business secrets, and money concepts",
+            "topic_focus": topic_focus,
             "language": "English",
             "caption_language": "English",
             "caption_color": "Yellow",
             "caption_font": "Arial Black",
-            "auto_search_keywords": [
-                "wealth secrets podcast",
-                "business advice podcast interview",
-                "how to build wealth podcast",
-                "money mindset podcast clip"
-            ],
+            "auto_search_keywords": auto_kws,
+            "negative_filters": negative_filters,
             "auto_pilot": False,
             "autopilot_interval_hours": 2,
             "last_autopilot_run": 0,
@@ -171,12 +393,15 @@ class ConfigManager:
         """Returns default top-level application settings with multi-channel profile storage."""
         base_dir = os.path.dirname(os.path.abspath(__file__))
         base_out = os.path.join(base_dir, "output")
-        default_profile = self.get_default_channel_profile("Wealth Secrets")
 
         return {
             "active_profile": "Wealth Secrets",
+            "groq_api_key": "",
+            "groq_api_keys_pool": [],
             "profiles": {
-                "Wealth Secrets": default_profile
+                "Wealth Secrets": self.get_default_channel_profile("Wealth Secrets"),
+                "Khao Pakistan": self.get_default_channel_profile("Khao Pakistan"),
+                "Nutrilogic Way": self.get_default_channel_profile("Nutrilogic Way")
             },
             "hardware_profile": "⚡ Auto-Detect & Maximum Performance (GPU Priority)",
             "reuse_cached_video_first": True,
@@ -231,16 +456,90 @@ class ConfigManager:
                 # Multi-profile migration check
                 profiles = self._config.get("profiles", {})
                 if not isinstance(profiles, dict) or not profiles:
-                    # Migrate existing flat config into 'Wealth Secrets' profile
-                    ws_profile = self.get_default_channel_profile("Wealth Secrets")
-                    for k in self.CHANNEL_SPECIFIC_KEYS:
-                        if k in self._config:
-                            ws_profile[k] = self._config[k]
-                    self._config["profiles"] = {"Wealth Secrets": ws_profile}
+                    # Migrate existing flat config into default profiles
+                    self._config["profiles"] = {
+                        "Wealth Secrets": self.get_default_channel_profile("Wealth Secrets"),
+                        "Khao Pakistan": self.get_default_channel_profile("Khao Pakistan"),
+                        "Nutrilogic Way": self.get_default_channel_profile("Nutrilogic Way")
+                    }
                     self._config["active_profile"] = "Wealth Secrets"
                     self.save_config()
-                elif "active_profile" not in self._config or self._config["active_profile"] not in self._config["profiles"]:
-                    self._config["active_profile"] = list(self._config["profiles"].keys())[0]
+                else:
+                    # Ensure the three standard brand profiles exist persistently
+                    standard_profiles = ["Wealth Secrets", "Khao Pakistan", "Nutrilogic Way"]
+                    updated = False
+                    for prof_name in standard_profiles:
+                        if prof_name not in self._config["profiles"]:
+                            self._config["profiles"][prof_name] = self.get_default_channel_profile(prof_name)
+                            updated = True
+                        else:
+                            ctx = self.get_channel_context(prof_name)
+                            prof_dict = self._config["profiles"][prof_name]
+                            if prof_name == "Wealth Secrets":
+                                current_kws = prof_dict.get("auto_search_keywords", [])
+                                if any("clip" in str(k).lower() for k in current_kws) or current_kws != ctx["auto_search_keywords"]:
+                                    prof_dict["auto_search_keywords"] = ctx["auto_search_keywords"]
+                                    updated = True
+                                if prof_dict.get("language") != "English" or prof_dict.get("caption_language") != "English":
+                                    prof_dict["language"] = "English"
+                                    prof_dict["caption_language"] = "English"
+                                    prof_dict["caption_font"] = "Arial Black"
+                                    updated = True
+                                if "negative_filters" not in prof_dict or prof_dict.get("negative_filters") != ctx.get("negative_filters", []):
+                                    prof_dict["negative_filters"] = ctx.get("negative_filters", [])
+                                    updated = True
+                            elif prof_name == "Khao Pakistan":
+                                current_tf = prof_dict.get("topic_focus", "")
+                                if not current_tf or "Pakistani street food" in current_tf or current_tf == "wealth, business secrets, and money concepts":
+                                    prof_dict["topic_focus"] = ctx["topic_focus"]
+                                    prof_dict["auto_search_keywords"] = ctx["auto_search_keywords"]
+                                    updated = True
+                            elif prof_name == "Nutrilogic Way":
+                                current_tf = prof_dict.get("topic_focus", "")
+                                if not current_tf or "organic" in current_tf or "natural organic health" in current_tf or "clinical" in current_tf or current_tf != ctx["topic_focus"]:
+                                    prof_dict["topic_focus"] = ctx["topic_focus"]
+                                    prof_dict["auto_search_keywords"] = ctx["auto_search_keywords"]
+                                    prof_dict["negative_filters"] = ctx.get("negative_filters", [])
+                                    updated = True
+
+                            if "negative_filters" not in prof_dict or prof_dict.get("negative_filters") != ctx.get("negative_filters", []):
+                                prof_dict["negative_filters"] = ctx.get("negative_filters", [])
+                                updated = True
+
+                            # Synchronize dynamic template paths for standard profiles if missing or legacy
+                            expected_tpl = ctx.get("template_path")
+                            current_tpl = prof_dict.get("template_path", "")
+                            legacy_patterns = ["wealth_secrets_template.png", "wealth secrets.png", "template.png"]
+                            is_legacy = any(lp in str(current_tpl).lower() for lp in legacy_patterns)
+                            resolved_current = self.resolve_asset_path(current_tpl)
+                            if not current_tpl or is_legacy or not os.path.exists(resolved_current):
+                                prof_dict["template_path"] = expected_tpl
+                                updated = True
+
+                    if "active_profile" not in self._config or self._config["active_profile"] not in self._config["profiles"]:
+                        self._config["active_profile"] = "Wealth Secrets"
+                        updated = True
+
+                    # Ensure API keys are shared and synchronized across global config and all profiles
+                    shared_primary = self.get_shared_groq_api_key()
+                    shared_pool = self.get_shared_groq_keys_pool()
+                    if shared_primary or shared_pool:
+                        if self._config.get("groq_api_key") != shared_primary:
+                            self._config["groq_api_key"] = shared_primary
+                            updated = True
+                        if self._config.get("groq_api_keys_pool") != shared_pool:
+                            self._config["groq_api_keys_pool"] = list(shared_pool)
+                            updated = True
+                        for prof_name, prof_dict in self._config.get("profiles", {}).items():
+                            if prof_dict.get("groq_api_key") != shared_primary:
+                                prof_dict["groq_api_key"] = shared_primary
+                                updated = True
+                            if prof_dict.get("groq_api_keys_pool") != shared_pool:
+                                prof_dict["groq_api_keys_pool"] = list(shared_pool)
+                                updated = True
+
+                    if updated:
+                        self.save_config()
 
             except Exception as e:
                 print(f"[ConfigManager] Error loading config ({e}), reverting to defaults.")
@@ -322,12 +621,22 @@ class ConfigManager:
 
     def get_channel_setting(self, key: str, default: Any = None, profile_name: Optional[str] = None) -> Any:
         """Retrieves setting value for a specific channel profile."""
+        if key == "groq_api_key":
+            return self.get_shared_groq_api_key()
+        if key == "groq_api_keys_pool":
+            return self.get_shared_groq_keys_pool()
         prof_name = profile_name or self.get_active_profile_name()
         prof = self._config.get("profiles", {}).get(prof_name, {})
         return prof.get(key, self._config.get(key, default))
 
     def set_channel_setting(self, key: str, value: Any, profile_name: Optional[str] = None) -> None:
         """Updates setting value for a specific channel profile and saves."""
+        if key == "groq_api_key":
+            self.set_shared_groq_keys(value, self.get_shared_groq_keys_pool())
+            return
+        if key == "groq_api_keys_pool":
+            self.set_shared_groq_keys(self.get_shared_groq_api_key(), value if isinstance(value, list) else [])
+            return
         prof_name = profile_name or self.get_active_profile_name()
         profiles = self._config.setdefault("profiles", {})
         if prof_name not in profiles:
@@ -565,20 +874,44 @@ class ConfigManager:
             self.set("last_generated_clip", clip_record)
 
     def mark_clip_uploaded(self, mp4_path: str, upload_info: Dict[str, Any], profile_name: Optional[str] = None) -> None:
-        """Marks clip as uploaded in persistent history."""
+        """Marks clip as uploaded in persistent history with multi-platform URLs."""
         history = self.get_channel_setting("generated_clips_history", [], profile_name) if profile_name else self.get("generated_clips_history", [])
         for record in history:
             if record.get("rendered_mp4_path") == mp4_path or record.get("title") == upload_info.get("title"):
                 record["uploaded"] = True
                 record["uploaded_at"] = time.time()
-                record["youtube_id"] = upload_info.get("id")
-                record["youtube_url"] = upload_info.get("url")
+                if "youtube_url" in upload_info:
+                    record["youtube_id"] = upload_info.get("youtube_id")
+                    record["youtube_url"] = upload_info.get("youtube_url")
+                elif upload_info.get("platform") == "youtube":
+                    record["youtube_id"] = upload_info.get("id")
+                    record["youtube_url"] = upload_info.get("url")
+
+                if "facebook_url" in upload_info:
+                    record["facebook_url"] = upload_info.get("facebook_url")
+                elif upload_info.get("platform") == "facebook":
+                    record["facebook_url"] = upload_info.get("url")
+
+                if "instagram_url" in upload_info:
+                    record["instagram_url"] = upload_info.get("instagram_url")
+                elif upload_info.get("platform") == "instagram":
+                    record["instagram_url"] = upload_info.get("url")
+
+                if "platforms" in upload_info:
+                    record["upload_platforms"] = upload_info.get("platforms")
 
         last = self.get_channel_setting("last_generated_clip", {}, profile_name) if profile_name else self.get("last_generated_clip", {})
         if last.get("rendered_mp4_path") == mp4_path:
             last["uploaded"] = True
             last["uploaded_at"] = time.time()
-            last["youtube_url"] = upload_info.get("url")
+            if "youtube_url" in upload_info:
+                last["youtube_url"] = upload_info.get("youtube_url")
+            elif upload_info.get("platform") == "youtube":
+                last["youtube_url"] = upload_info.get("url")
+            if "facebook_url" in upload_info:
+                last["facebook_url"] = upload_info.get("facebook_url")
+            if "instagram_url" in upload_info:
+                last["instagram_url"] = upload_info.get("instagram_url")
             if profile_name:
                 self.set_channel_setting("last_generated_clip", last, profile_name)
             else:
@@ -701,21 +1034,18 @@ class ConfigManager:
                 timer.start()
 
     def get_api_key_pool(self, profile_name: Optional[str] = None) -> List[str]:
-        """Returns list of all available Groq API keys including default key from the specified or active profile."""
-        if not profile_name:
-            profile_name = self.get("active_profile")
-            
+        """Returns list of all available Groq API keys including default key shared across all channels."""
         keys = []
-        default_key = self.get_channel_setting("groq_api_key", "", profile_name).strip()
+        default_key = self.get_shared_groq_api_key()
         if default_key:
             keys.append(default_key)
-            
-        pool = self.get_channel_setting("groq_api_keys_pool", [], profile_name)
+
+        pool = self.get_shared_groq_keys_pool()
         for k in pool:
             k_clean = k.strip()
             if k_clean and k_clean not in keys:
                 keys.append(k_clean)
-                
+
         return keys
 
     def verify_admin_password(self, input_password: str) -> bool:

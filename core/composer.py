@@ -238,6 +238,37 @@ def create_moviepy_subtitle_clip(
         return None
 
 
+def create_moviepy_template_clip(
+    template_path: Optional[str],
+    size: Tuple[int, int] = (1080, 1920),
+    duration: Optional[float] = None
+):
+    """
+    Creates a MoviePy ImageClip for branded template overlay with os.path.exists check.
+    Returns None safely if template is missing or invalid.
+    """
+    if not template_path or not os.path.exists(template_path):
+        return None
+    try:
+        try:
+            from moviepy import ImageClip
+        except ImportError:
+            from moviepy.editor import ImageClip
+        clip = ImageClip(template_path)
+        if hasattr(clip, "resized"):
+            clip = clip.resized(size)
+        elif hasattr(clip, "resize"):
+            clip = clip.resize(size)
+        if duration is not None:
+            if hasattr(clip, "with_duration"):
+                clip = clip.with_duration(duration)
+            elif hasattr(clip, "set_duration"):
+                clip = clip.set_duration(duration)
+        return clip
+    except Exception:
+        return None
+
+
 class FFmpegComposer:
     """
     Video Compositing Engine for AMB Enterprise.
@@ -250,7 +281,7 @@ class FFmpegComposer:
         self,
         output_width: int = 1080,
         output_height: int = 1920,
-        template_path: str = "assets/template.png",
+        template_path: Optional[str] = "assets/wealth secret template (2).jpg",
         ffmpeg_threads: str = "0",
         ffmpeg_preset: str = "fast",
         ffmpeg_encoder_args: Optional[List[str]] = None,
@@ -301,20 +332,26 @@ class FFmpegComposer:
         return os.path.abspath(urdu_dir)
 
     def _ensure_template_exists(self):
-        """Generates default 9:16 overlay template PNG (1080x1920) if missing."""
+        """Generates default 9:16 overlay template PNG (1080x1920) if missing and path provided."""
+        if not self.template_path:
+            return
         if not os.path.exists(self.template_path):
-            os.makedirs(os.path.dirname(self.template_path), exist_ok=True)
+            dir_name = os.path.dirname(self.template_path)
+            if dir_name:
+                os.makedirs(dir_name, exist_ok=True)
             self.logger.info(f"[Composer] Creating default 9:16 template image ({self.output_width}x{self.output_height}): {self.template_path}")
+            try:
+                img = Image.new("RGBA", (self.output_width, self.output_height), (0, 0, 0, 0))
+                draw = ImageDraw.Draw(img)
 
-            img = Image.new("RGBA", (self.output_width, self.output_height), (0, 0, 0, 0))
-            draw = ImageDraw.Draw(img)
-
-            # Top branding header accent line
-            draw.rectangle([0, 0, self.output_width, 8], fill=(0, 210, 255, 255))
-            
-            # Save template
-            img.save(self.template_path, "PNG")
-            self.logger.info("[Composer] Template PNG initialized successfully.")
+                # Top branding header accent line
+                draw.rectangle([0, 0, self.output_width, 8], fill=(0, 210, 255, 255))
+                
+                # Save template
+                img.save(self.template_path, "PNG")
+                self.logger.info("[Composer] Template PNG initialized successfully.")
+            except Exception as e:
+                self.logger.warning(f"[Composer] Could not initialize fallback template image ({e}).")
 
     def detect_speaker_face_offset(self, video_path: str, start_sec: float) -> float:
         """
@@ -467,7 +504,12 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             if not raw_word:
                 continue
 
-            word_str = raw_word.upper() if is_english else raw_word
+            # Clean raw word from stray formatting artifacts
+            clean_word = raw_word.strip("\"'()[]{}<>~`*")
+            if not clean_word:
+                clean_word = raw_word
+
+            word_str = clean_word.upper() if is_english else clean_word
 
             current_line.append({
                 "word": word_str,
@@ -475,18 +517,31 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                 "end": rel_end
             })
 
-            if len(current_line) >= effective_wpl or raw_word.endswith((".", "!", "?", "۔", "؟", "。", "！", "？", "،", ",")):
+            # Check sentence and phrase boundary conditions
+            has_major_punct = any(raw_word.endswith(p) for p in [".", "!", "?", "۔", "؟", "。", "！", "？"])
+            has_minor_punct = any(raw_word.endswith(p) for p in [",", "،", ";", ":"])
+
+            # Break line if target word count reached, major punctuation hit, or minor punctuation with >= 2 words
+            if len(current_line) >= effective_wpl or has_major_punct or (has_minor_punct and len(current_line) >= 2):
                 lines_data.append(current_line)
                 current_line = []
 
         if current_line:
-            lines_data.append(current_line)
+            # If trailing line is a single orphan word with short duration, merge into previous line if possible
+            if len(current_line) == 1 and lines_data and len(lines_data[-1]) < (effective_wpl + 1):
+                lines_data[-1].append(current_line[0])
+            else:
+                lines_data.append(current_line)
 
-        # Prevent visual overlap between consecutive subtitle lines
+        # Anti-flicker smoothing & overlap prevention between consecutive subtitle lines
         for i in range(len(lines_data) - 1):
+            curr_end = lines_data[i][-1]["end"]
             next_start = lines_data[i + 1][0]["start"]
-            if lines_data[i][-1]["end"] > next_start:
+            if curr_end > next_start:
                 lines_data[i][-1]["end"] = max(lines_data[i][0]["start"] + 0.1, next_start)
+            elif (next_start - curr_end) <= 0.35:
+                # Close tiny gaps to eliminate annoying subtitle box flickering between spoken words
+                lines_data[i][-1]["end"] = max(curr_end, round(next_start - 0.04, 3))
 
         # Dynamic bounding box measurement & mathematical proof printout
         try:
@@ -549,7 +604,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                 raw_line = " ".join(item["word"] for item in line)
                 dialogue = f"Dialogue: 0,{line_start_str},{line_end_str},Karaoke,,0,0,0,,{pos_tag}{raw_line}"
             elif is_english:
-                # English raw text with karaoke word highlighting
+                # English raw text with smooth progressive karaoke fill (\kf)
                 karaoke_text = ""
                 for idx, item in enumerate(line):
                     if idx < len(line) - 1:
@@ -558,7 +613,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                         dur_sec = max(0.05, item["end"] - item["start"])
                     dur_cs = max(1, int(round(dur_sec * 100)))
                     w_str = item["word"]
-                    karaoke_text += "{\\k" + str(dur_cs) + "}" + w_str + " "
+                    karaoke_text += "{\\kf" + str(dur_cs) + "}" + w_str + " "
                 dialogue = f"Dialogue: 0,{line_start_str},{line_end_str},Karaoke,,0,0,0,,{pos_tag}{karaoke_text.strip()}"
             else:
                 # For all else conditions: pass raw text and default font directly to clip generator
@@ -582,15 +637,16 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             print(f"[Composer ASS WARNING] Zero dialogue events were generated! Check words input.")
         return ass_output_path
 
-    def detect_template_viewport(self, template_path: str) -> Tuple[int, int, int, int, str]:
+    def detect_template_viewport(self, template_path: Optional[str]) -> Tuple[int, int, int, int, Optional[str]]:
         """
         Detects the video viewing window (vx, vy, vw, vh) within the template.
         If the template has a solid blue/placeholder center (like the user's template),
         it detects the blue rectangle, creates a transparent cutout for FFmpeg overlay,
         and returns the coordinates and the transparent overlay path.
+        If template is missing or None, returns full dimensions and None.
         """
         if not template_path or not os.path.exists(template_path):
-            return 0, 0, self.output_width, self.output_height, template_path
+            return 0, 0, self.output_width, self.output_height, None
 
         try:
             img = Image.open(template_path).convert("RGBA")
@@ -646,7 +702,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         except Exception as e:
             self.logger.warning(f"[Composer] Viewport detection note ({e}), using default full-screen.")
 
-        return 0, 0, self.output_width, self.output_height, template_path
+        return 0, 0, self.output_width, self.output_height, template_path if (template_path and os.path.exists(template_path)) else None
 
     def render_short_clip(
         self,
@@ -701,22 +757,34 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
         # Detect viewport in template (blue zone or transparent box)
         vx, vy, vw, vh, overlay_template_path = self.detect_template_viewport(self.template_path)
-        escaped_template_path = overlay_template_path.replace("\\", "/")
+        has_template = bool(overlay_template_path and os.path.exists(overlay_template_path))
+        escaped_template_path = overlay_template_path.replace("\\", "/") if has_template else ""
 
+        target_in = "[with_template]" if has_template else "[cropped]"
         sub_filter = ""
 
         if enable_captions:
-            # Item 3: Validate and compute sub_clip_start accurately
-            if is_pre_cut and aligned_words:
-                first_word_start = float(aligned_words[0].get("start", 0.0))
-                # If timestamps are near the full video start_sec (e.g. >= start_sec - 10s)
-                if first_word_start >= max(0.0, start_sec - 10.0):
-                    sub_clip_start = start_sec
-                else:
-                    # Timestamps are already relative to partial video cut (0.0s)
-                    sub_clip_start = 0.0
-            else:
-                sub_clip_start = start_sec if not is_pre_cut else 0.0
+            # Timestamp Normalization Safeguard:
+            # If is_pre_cut is True, all caption timestamps must be in [0.0, duration_sec].
+            # Check if words need offset subtraction (e.g. if still unoffset with start >= start_sec - 2.0).
+            normalized_words = []
+            if aligned_words:
+                first_word_s = float(aligned_words[0].get("start", 0.0))
+                needs_offset = is_pre_cut and (first_word_s >= duration_sec or (start_sec > 2.0 and first_word_s >= (start_sec - 2.0)))
+                offset_val = start_sec if needs_offset else 0.0
+
+                for w in aligned_words:
+                    w_s = max(0.0, round(float(w.get("start", 0.0)) - offset_val, 3))
+                    w_e = max(w_s + 0.05, round(float(w.get("end", 0.0)) - offset_val, 3))
+                    if w_s <= (duration_sec + 0.5):
+                        normalized_words.append({
+                            "word": w.get("word", ""),
+                            "start": w_s,
+                            "end": min(round(duration_sec, 3), w_e)
+                        })
+                aligned_words = normalized_words
+
+            sub_clip_start = 0.0 if is_pre_cut else start_sec
 
             print(f"[Composer Subtitle Mapping] Clip duration: {duration_sec:.1f}s | Words received: {len(aligned_words)} | sub_clip_start: {sub_clip_start:.2f}s | Language: '{language}'")
 
@@ -744,36 +812,41 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                 escaped_ass_path = ass_path.replace("\\", "/").replace(":", "\\:")
                 if fonts_dir and os.path.exists(fonts_dir):
                     font_dir_escaped = os.path.abspath(fonts_dir).replace("\\", "/").replace(":", "\\:")
-                    sub_filter = f",[with_template]subtitles='{escaped_ass_path}':fontsdir='{font_dir_escaped}'[outv]"
+                    sub_filter = f";{target_in}subtitles='{escaped_ass_path}':fontsdir='{font_dir_escaped}'[outv]"
                 else:
-                    sub_filter = f",[with_template]subtitles='{escaped_ass_path}'[outv]"
+                    sub_filter = f";{target_in}subtitles='{escaped_ass_path}'[outv]"
         else:
-            sub_filter = "[outv]" # fallback rename
+            sub_filter = f";{target_in}copy[outv]"
 
-        self.logger.info(f"[Composer] Multi-thread rendering Short (Viewport: {vw}x{vh}, Face-Track: {enable_face_tracking}, Captions: {enable_captions}, Pre-cut: {is_pre_cut}, Lang: {language})...")
+        self.logger.info(f"[Composer] Multi-thread rendering Short (Viewport: {vw}x{vh}, HasTemplate: {has_template}, Face-Track: {enable_face_tracking}, Captions: {enable_captions}, Pre-cut: {is_pre_cut}, Lang: {language})...")
 
         # Build FFmpeg filter complex:
-        if vy == 0 and vh == self.output_height:
-            filter_complex = (
-                f"[0:v]crop=w=ih*9/16:h=ih:x='min(max(0, {face_x_ratio:.3f}*iw-ow/2), iw-ow)':y=0,"
-                f"scale={self.output_width}:{self.output_height}[cropped];"
-                f"[cropped][1:v]overlay=0:0[with_template]"
-                f"{sub_filter if (enable_captions and not route_to_chrome_moviepy) else ''}"
-            )
-            if not enable_captions or route_to_chrome_moviepy:
-                filter_complex += ";[with_template]copy[outv]"
+        if has_template:
+            if vy == 0 and vh == self.output_height:
+                filter_complex = (
+                    f"[0:v]crop=w=ih*9/16:h=ih:x='min(max(0, {face_x_ratio:.3f}*iw-ow/2), iw-ow)':y=0,"
+                    f"scale={self.output_width}:{self.output_height}[cropped];"
+                    f"[cropped][1:v]overlay=0:0[with_template]"
+                )
+            else:
+                filter_complex = (
+                    f"[0:v]crop=w='min(iw, ih*{vw}/{vh})':h='min(ih, iw*{vh}/{vw})':"
+                    f"x='min(max(0, {face_x_ratio:.3f}*iw-ow/2), iw-ow)':y=0,"
+                    f"scale={vw}:{vh}[video_scaled];"
+                    f"color=c=black:s={self.output_width}x{self.output_height}:d={duration_sec}[canvas];"
+                    f"[canvas][video_scaled]overlay={vx}:{vy}[canvas_with_video];"
+                    f"[canvas_with_video][1:v]overlay=0:0[with_template]"
+                )
         else:
             filter_complex = (
-                f"[0:v]crop=w='min(iw, ih*{vw}/{vh})':h='min(ih, iw*{vh}/{vw})':"
-                f"x='min(max(0, {face_x_ratio:.3f}*iw-ow/2), iw-ow)':y=0,"
-                f"scale={vw}:{vh}[video_scaled];"
-                f"color=c=black:s={self.output_width}x{self.output_height}:d={duration_sec}[canvas];"
-                f"[canvas][video_scaled]overlay={vx}:{vy}[canvas_with_video];"
-                f"[canvas_with_video][1:v]overlay=0:0[with_template]"
-                f"{sub_filter if (enable_captions and not route_to_chrome_moviepy) else ''}"
+                f"[0:v]crop=w=ih*9/16:h=ih:x='min(max(0, {face_x_ratio:.3f}*iw-ow/2), iw-ow)':y=0,"
+                f"scale={self.output_width}:{self.output_height}[cropped]"
             )
-            if not enable_captions or route_to_chrome_moviepy:
-                filter_complex += ";[with_template]copy[outv]"
+
+        if enable_captions and not route_to_chrome_moviepy:
+            filter_complex += sub_filter
+        else:
+            filter_complex += f";{target_in}copy[outv]"
 
         # Determine actual destination for FFmpeg render:
         # If routing to Chrome MoviePy, output FFmpeg base to a temp path so MoviePy can read it
@@ -797,7 +870,10 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                 "-threads", str(self.ffmpeg_threads),
                 "-ss", str(seek_start),
                 "-i", source_video_path,
-                "-i", escaped_template_path,
+            ]
+            if has_template:
+                ffmpeg_cmd.extend(["-i", escaped_template_path])
+            ffmpeg_cmd.extend([
                 "-t", str(duration_sec),
                 "-filter_complex", filter_complex,
                 "-map", "[outv]",
@@ -806,7 +882,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                 "-c:a", "aac",
                 "-b:a", "192k",
                 temp_base_mp4
-            ]
+            ])
 
             self.logger.info(f"[Composer] Executing multi-threaded FFmpeg rendering command...")
 
@@ -827,6 +903,9 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         if route_to_chrome_moviepy:
             self.logger.info(f"[Composer] [Step 1] Triggering ChromeCaptionRenderer for Urdu subtitles...")
             temp_captions_dir = os.path.join(BASE_DIR, "output", "temp_captions")
+            if os.path.exists(temp_captions_dir):
+                shutil.rmtree(temp_captions_dir, ignore_errors=True)
+            os.makedirs(temp_captions_dir, exist_ok=True)
             caption_items = []
             try:
                 if aligned_words:
@@ -841,17 +920,6 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                     )
             except Exception as e:
                 self.logger.warning(f"[Composer] Playwright caption generation note: {e}")
-
-            # Fallback / reconnection: check if temp_captions already has caption_metadata.json
-            if not caption_items:
-                meta_path = os.path.join(temp_captions_dir, "caption_metadata.json")
-                if os.path.exists(meta_path):
-                    try:
-                        with open(meta_path, "r", encoding="utf-8") as mf:
-                            caption_items = json.load(mf)
-                        self.logger.info(f"[Composer] Reconnected {len(caption_items)} cached caption PNGs from '{meta_path}'.")
-                    except Exception:
-                        pass
 
             if caption_items and os.path.exists(temp_base_mp4):
                 try:

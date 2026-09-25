@@ -1,2 +1,16 @@
 settings.json
 __pycache__/
+# Brag & OpenCode
+brag-output/
+.opencode/
+# Credentials & Secrets
+token.json
+cookies.txt
+Creadintels/
+hardware_cache.json
+
+# Cache & Renders
+__pycache__/
+output/
+test_renders/
+scratch/

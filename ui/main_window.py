@@ -12,7 +12,7 @@ from tkinter import messagebox
 from config import ConfigManager
 from ui.admin_modal import AdminPasswordDialog, AdminSettingsModal
 from core.pipeline import ShortsAutomationPipeline
-from core.publisher import YouTubePublisher
+from core.publisher import MultiPlatformPublisher, YouTubePublisher
 
 # Configure CustomTkinter dark theme defaults
 ctk.set_appearance_mode("Dark")
@@ -137,7 +137,7 @@ class MainWindow(ctk.CTk):
             font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
             command=self._on_admin_click
         )
-        self.admin_btn.pack(side="right", padx=20, pady=15)
+        self.admin_btn.pack(side="right", padx=(10, 20), pady=15)
 
         self.status_badge = ctk.CTkLabel(
             header_frame,
@@ -147,35 +147,33 @@ class MainWindow(ctk.CTk):
             corner_radius=4,
             text_color="#FFFFFF"
         )
-        self.status_badge.pack(side="right", padx=10, pady=15)
+        self.status_badge.pack(side="right", padx=(0, 10), pady=15)
 
-        # Main Dashboard Channel Profile Selector
-        self.profile_var = ctk.StringVar(value=self.config_manager.get_active_profile_name())
-        self.profile_menu = ctk.CTkOptionMenu(
-            header_frame,
-            variable=self.profile_var,
-            values=self.config_manager.get_profiles_list(),
-            command=self._on_dashboard_profile_change,
-            width=170,
-            corner_radius=4,
-            fg_color="#2C353D",
-            button_color="#2C353D",
-            button_hover_color="#1E252B",
-            text_color="#FFFFFF",
-            dropdown_fg_color="#1B1E23",
-            dropdown_hover_color="#2C353D",
-            dropdown_text_color="#FFFFFF",
-            font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
-            dropdown_font=ctk.CTkFont(family="Segoe UI", size=12)
-        )
-        self.profile_menu.pack(side="right", padx=(0, 10), pady=15)
+        # Profile Selector directly on Main Dashboard
+        profile_selector_frame = ctk.CTkFrame(header_frame, fg_color="transparent")
+        profile_selector_frame.pack(side="right", padx=(10, 15), pady=12)
 
         ctk.CTkLabel(
-            header_frame,
-            text="📺 Channel:",
+            profile_selector_frame,
+            text="Channel Profile:",
             font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
-            text_color="#D4C5B0"
-        ).pack(side="right", padx=(0, 4), pady=15)
+            text_color="#FFFFFF"
+        ).pack(side="left", padx=(0, 6))
+
+        self.dashboard_profile_var = ctk.StringVar(value=self.config_manager.get_active_profile_name())
+        self.dashboard_profile_menu = ctk.CTkOptionMenu(
+            profile_selector_frame,
+            variable=self.dashboard_profile_var,
+            values=self.config_manager.get_profiles_list(),
+            command=self._on_dashboard_profile_change,
+            width=180,
+            height=32,
+            fg_color="#1F6AA5",
+            button_color="#144870",
+            button_hover_color="#0F3856",
+            font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold")
+        )
+        self.dashboard_profile_menu.pack(side="left")
 
         # Status & State Summary Bar (Integrated Telemetry Banner)
         summary_frame = ctk.CTkFrame(
@@ -207,13 +205,17 @@ class MainWindow(ctk.CTk):
         )
         input_frame.pack(fill="x", padx=20, pady=10)
 
-        url_label = ctk.CTkLabel(
+        active_prof = self.config_manager.get_active_profile_name()
+        initial_ctx = self.config_manager.get_channel_context(active_prof)
+        content_type = initial_ctx.get("content_type", "podcast")
+
+        self.url_label = ctk.CTkLabel(
             input_frame,
-            text="Podcast YouTube URL (or leave blank to Auto-Discover fresh podcast):",
+            text=f"{content_type.title()} YouTube URL (or leave blank to Auto-Discover fresh {content_type}):",
             font=ctk.CTkFont(family="Segoe UI", size=13, weight="bold"),
             text_color="#FFFFFF"
         )
-        url_label.pack(anchor="w", padx=15, pady=(15, 6))
+        self.url_label.pack(anchor="w", padx=15, pady=(15, 6))
 
         entry_box = ctk.CTkFrame(input_frame, fg_color="transparent")
         entry_box.pack(fill="x", padx=15, pady=(0, 12))
@@ -513,15 +515,57 @@ class MainWindow(ctk.CTk):
 
         self.logger.info("AMB Enterprise initialized. Multi-Channel profiles ready with template viewport compositing.")
 
-    def _on_dashboard_profile_change(self, selected_profile: str):
-        """Switches active profile when selected on dashboard."""
-        self.config_manager.set_active_profile(selected_profile)
+    def refresh_dashboard_ui(self, channel_name: Optional[str] = None):
+        """
+        Dynamically refreshes the main dashboard UI fields to match the active channel context.
+        Automatically clears and overwrites the 'Topic Focus' text input box with the niche-specific string
+        from the context dictionary, updates language/fonts, and refreshes the live telemetry banner.
+        """
+        active_prof = channel_name or self.config_manager.get_active_profile_name()
+        self.config_manager.set_active_profile(active_prof)
+
+        # Retrieve context dictionary mapping for the active profile
+        ctx = self.config_manager.get_channel_context(active_prof)
+        target_topic = ctx.get("topic_focus", "wealth, business secrets, and money concepts")
+
+        # Automatically clear and overwrite the 'Topic Focus' text input box
         self.topic_entry.delete(0, "end")
-        self.topic_entry.insert(0, self.config_manager.get_channel_setting("topic_focus", "wealth, business secrets, and money concepts", selected_profile))
+        self.topic_entry.insert(0, target_topic)
+
+        # Update language/color/font dropdowns to match profile configuration
         if hasattr(self, "language_var"):
-            self.language_var.set(self.config_manager.get_language(selected_profile))
+            self.language_var.set(self.config_manager.get_language(active_prof))
+        if hasattr(self, "caption_language_var"):
+            self.caption_language_var.set(self.config_manager.get_caption_language(active_prof))
+        if hasattr(self, "caption_language_combo"):
+            self.caption_language_combo.set(self.config_manager.get_caption_language(active_prof))
+
+        # Update dashboard profile dropdown selector
+        if hasattr(self, "dashboard_profile_var"):
+            self.dashboard_profile_var.set(active_prof)
+        if hasattr(self, "dashboard_profile_menu"):
+            self.dashboard_profile_menu.configure(values=self.config_manager.get_profiles_list())
+            self.dashboard_profile_menu.set(active_prof)
+
+        # Dynamically update URL input label to match channel's content_type
+        content_type = ctx.get("content_type", "podcast")
+        if hasattr(self, "url_label"):
+            self.url_label.configure(
+                text=f"{content_type.title()} YouTube URL (or leave blank to Auto-Discover fresh {content_type}):"
+            )
+
+        # Refresh telemetry strip
         self._refresh_state_info()
-        self.logger.info(f"[Dashboard] Switched active channel profile to: '{selected_profile}' (Language: '{self.config_manager.get_language(selected_profile)}')")
+
+        niche = ctx.get("niche_name", "Content Production")
+        self.logger.info(
+            f"[Dashboard] Dynamic Context Switched to '{active_prof}' ({niche}). "
+            f"Topic Focus set to: '{target_topic}'"
+        )
+
+    def _on_dashboard_profile_change(self, selected_profile: str):
+        """Switches active profile and dynamically updates dashboard UI."""
+        self.refresh_dashboard_ui(selected_profile)
 
     def _on_caption_language_change(self, selected_lang: str):
         """Updates caption language setting directly to settings.json when modified by the admin."""
@@ -589,35 +633,97 @@ class MainWindow(ctk.CTk):
         else:
             video_txt = "Next Run: Fresh Discovery"
 
-        ap_txt = f"Auto-Pilot: Active ({interval_h}h)" if autopilot_on else "Auto-Pilot: Off"
+        now = time.time()
+        if autopilot_on:
+            next_run = float(self.config_manager.get_channel_setting("next_autopilot_run", 0, current_prof) or 0)
+            if next_run <= 0:
+                interval_secs = float(interval_h) * 3600
+                last_run = float(self.config_manager.get_channel_setting("last_autopilot_run", 0, current_prof) or 0)
+                if last_run > 0:
+                    next_run = last_run + interval_secs
+                else:
+                    next_run = now + interval_secs
+                self.config_manager.set_channel_setting("next_autopilot_run", next_run, current_prof)
+
+            remaining_sec = max(0, int(next_run - now))
+            hrs = remaining_sec // 3600
+            mins = (remaining_sec % 3600) // 60
+            secs = remaining_sec % 60
+            if hrs > 0:
+                countdown_str = f"{hrs}h {mins:02d}m {secs:02d}s"
+            else:
+                countdown_str = f"{mins}m {secs:02d}s"
+            ap_txt = f"⏱️ Next Video in: {countdown_str} (Auto-Pilot: {interval_h}h)"
+        else:
+            ap_txt = "Auto-Pilot: Off"
         
         import threading
         
         def update_hw_label():
             hw_settings = self.config_manager.get_hardware_settings()
             hw_summary = hw_settings.get("summary", "")
-            self.after(0, lambda: self._apply_hw_summary(hw_summary, video_txt, ap_txt, current_prof))
+            self._cached_hw_summary = hw_summary
+            try:
+                self.after(0, lambda: self._apply_hw_summary(hw_summary, video_txt, ap_txt, current_prof))
+            except Exception:
+                pass
             
         threading.Thread(target=update_hw_label, daemon=True).start()
         
     def _apply_hw_summary(self, hw_summary, video_txt, ap_txt, current_prof):
+        self._cached_hw_summary = hw_summary
         self.state_info_label.configure(text=f"📺 [{current_prof}] | {video_txt} | {ap_txt} | ⚡ {hw_summary}")
 
-        # Keep profile dropdown in sync
-        all_profs = self.config_manager.get_profiles_list()
-        self.profile_menu.configure(values=all_profs)
-        if self.profile_var.get() != current_prof:
-            self.profile_var.set(current_prof)
+    def _refresh_countdown_display(self):
+        """Live updates remaining autopilot countdown and channel name on dashboard banner every second."""
+        current_prof = self.config_manager.get_active_profile_name()
+        autopilot_on = self.config_manager.get_channel_setting("auto_pilot", False, current_prof)
+        interval_h = self.config_manager.get_channel_setting("autopilot_interval_hours", 2, current_prof)
+        now = time.time()
+
+        active_state = self.config_manager.get_channel_setting("active_video_state", {}, current_prof)
+        active_vid = active_state.get("video_id", "")
+        completed = active_state.get("completed_clip_count", 0)
+        target = active_state.get("target_clip_count", 3)
+        video_txt = f"Video: {active_vid} (Clip {completed + 1} of {target})" if active_vid else "Next Run: Fresh Discovery"
+
+        if autopilot_on:
+            next_run = float(self.config_manager.get_channel_setting("next_autopilot_run", 0, current_prof) or 0)
+            if next_run > 0:
+                remaining_sec = max(0, int(next_run - now))
+                hrs = remaining_sec // 3600
+                mins = (remaining_sec % 3600) // 60
+                secs = remaining_sec % 60
+                if hrs > 0:
+                    countdown_str = f"{hrs}h {mins:02d}m {secs:02d}s"
+                else:
+                    countdown_str = f"{mins}m {secs:02d}s"
+                ap_txt = f"⏱️ Next Video in: {countdown_str} (Auto-Pilot: {interval_h}h)"
+            else:
+                ap_txt = f"Auto-Pilot: Active ({interval_h}h)"
+        else:
+            ap_txt = "Auto-Pilot: Off"
+
+        hw_summary = getattr(self, "_cached_hw_summary", "")
+        self.state_info_label.configure(text=f"📺 [{current_prof}] | {video_txt} | {ap_txt} | ⚡ {hw_summary}")
 
     def _autofetch_click(self):
-        """Clears URL field to trigger automatic YouTube podcast search."""
+        """Clears URL field to trigger automatic YouTube discovery based on active channel."""
         self.url_entry.delete(0, "end")
-        self.logger.info("URL cleared. Auto-discovery will find a fresh podcast on next run.")
+        active_prof = self.config_manager.get_active_profile_name()
+        ctx = self.config_manager.get_channel_context(active_prof)
+        content_type = ctx.get("content_type", "video")
+        self.logger.info(f"URL cleared. Auto-discovery will find a fresh {content_type} on next run.")
 
     def _on_admin_click(self):
         """Triggers password dialog before opening Admin Settings."""
         def open_admin():
-            AdminSettingsModal(self, self.config_manager)
+            AdminSettingsModal(
+                self,
+                self.config_manager,
+                on_save_callback=self.refresh_dashboard_ui,
+                on_profile_switch_callback=self.refresh_dashboard_ui
+            )
             self._refresh_state_info()
 
         AdminPasswordDialog(self, self.config_manager, on_success_callback=open_admin)
@@ -651,15 +757,33 @@ class MainWindow(ctk.CTk):
                 self.logger.info(f"[Auto-Cleanup] Purged {len(purged)} file(s) after 1-hour expiration window.")
             self._refresh_state_info()
 
+        # Update live countdown display every second
+        if now - getattr(self, "_last_countdown_tick", 0) >= 1.0:
+            self._last_countdown_tick = now
+            self._refresh_countdown_display()
+
         # Multi-Channel Background Autopilot ("working on multiple channels in backtime")
         if not (self.worker_thread and self.worker_thread.is_alive()):
             for prof_name in self.config_manager.get_profiles_list():
                 if self.config_manager.get_channel_setting("auto_pilot", False, prof_name):
-                    interval_secs = self.config_manager.get_channel_setting("autopilot_interval_hours", 2, prof_name) * 3600
-                    last_run = self.config_manager.get_channel_setting("last_autopilot_run", 0, prof_name)
-                    if now - last_run >= interval_secs:
-                        self.logger.info(f"[Auto-Pilot] Channel '{prof_name}' interval reached ({self.config_manager.get_channel_setting('autopilot_interval_hours', 2, prof_name)}h). Triggering scheduled 1-short background generation...")
+                    interval_secs = float(self.config_manager.get_channel_setting("autopilot_interval_hours", 2, prof_name)) * 3600
+                    next_run = float(self.config_manager.get_channel_setting("next_autopilot_run", 0, prof_name) or 0)
+
+                    # Initialize next_run safely if uninitialized (NEVER trigger instantly)
+                    if next_run <= 0:
+                        next_run = now + interval_secs
                         self.config_manager.set_channel_setting("last_autopilot_run", now, prof_name)
+                        self.config_manager.set_channel_setting("next_autopilot_run", next_run, prof_name)
+                        continue
+
+                    if now >= next_run:
+                        self.logger.info(
+                            f"[Auto-Pilot] Channel '{prof_name}' interval reached ({self.config_manager.get_channel_setting('autopilot_interval_hours', 2, prof_name)}h). "
+                            f"Triggering scheduled 1-short background generation..."
+                        )
+                        self.config_manager.set_channel_setting("last_autopilot_run", now, prof_name)
+                        self.config_manager.set_channel_setting("next_autopilot_run", now + interval_secs, prof_name)
+                        self.config_manager.save_config()
                         self._start_processing(target_profile=prof_name)
                         break
 
@@ -667,7 +791,7 @@ class MainWindow(ctk.CTk):
 
     def _start_processing_new_video(self):
         """Resets active video state, wipes cache, and then starts the pipeline for fresh discovery."""
-        current_prof = self.profile_menu.get()
+        current_prof = self.config_manager.get_active_profile_name()
         
         # Purge the actual disk cache so pipeline doesn't reuse the old video
         dirs = self.config_manager.get_channel_output_dirs(current_prof)
@@ -755,7 +879,7 @@ class MainWindow(ctk.CTk):
 
     def _on_manual_upload_click(self):
         """
-        Handles Manual Upload of the latest generated video short to YouTube for active channel.
+        Handles Manual Upload of the latest generated video short across all enabled social platforms.
         """
         if self.manual_upload_thread and self.manual_upload_thread.is_alive():
             self.logger.warning("Manual upload is already in progress.")
@@ -763,11 +887,23 @@ class MainWindow(ctk.CTk):
 
         current_prof = self.config_manager.get_active_profile_name()
         yt_oauth = self.config_manager.get_channel_setting("youtube_oauth_json_path", "", current_prof).strip()
-        if not yt_oauth or not os.path.exists(yt_oauth):
+        meta_tok = (
+            self.config_manager.get_channel_setting("meta_access_token", "", current_prof) or
+            self.config_manager.get_channel_setting("facebook_access_token", "", current_prof)
+        ).strip()
+        fb_page_id = self.config_manager.get_channel_setting("facebook_page_id", "", current_prof).strip()
+        ig_account_id = self.config_manager.get_channel_setting("instagram_account_id", "", current_prof).strip()
+
+        has_yt = bool(yt_oauth and os.path.exists(yt_oauth))
+        has_fb = bool(meta_tok and fb_page_id)
+        has_ig = bool(meta_tok and ig_account_id)
+
+        if not (has_yt or has_fb or has_ig):
             messagebox.showwarning(
-                "YouTube OAuth Required",
-                f"YouTube OAuth credentials (client_secret.json) are not configured for channel '{current_prof}'!\n\n"
-                "Please go to Admin Settings -> API Keys & Auth to select your OAuth JSON file."
+                "Upload Credentials Required",
+                f"No upload credentials configured for channel '{current_prof}'!\n\n"
+                "Please open Admin Settings -> API Keys & Auth to configure your YouTube OAuth JSON "
+                "or Meta Access Token with Facebook Page ID / Instagram Account ID."
             )
             return
 
@@ -782,28 +918,24 @@ class MainWindow(ctk.CTk):
         self.manual_upload_thread.start()
 
     def _run_manual_upload_worker(self, profile_name: str):
-        """Worker thread for manual YouTube upload and 1-hour deletion scheduling for a profile."""
+        """Worker thread for manual multi-platform upload and 1-hour deletion scheduling for a profile."""
         try:
-            yt_oauth = self.config_manager.get_channel_setting("youtube_oauth_json_path", "", profile_name).strip()
-            publisher = YouTubePublisher(client_secrets_file=yt_oauth, logger=self.logger)
-
-            if not publisher.authenticate():
-                self.logger.error(f"[Manual Upload] YouTube authentication failed for profile '{profile_name}'.")
-                self.after(0, lambda: self.manual_upload_btn.configure(state="normal"))
-                return
-
             dirs = self.config_manager.get_channel_output_dirs(profile_name)
             shorts_dir = dirs["shorts_clips"]
 
             target_mp4 = None
             clip_title = f"{profile_name} Short"
-            clip_desc = f"Automated 9:16 Short for {profile_name}"
+            clip_hook = ""
+            clip_rationale = ""
+            clip_hashtags = []
 
             last_clip = self.config_manager.get_channel_setting("last_generated_clip", {}, profile_name)
             if last_clip and last_clip.get("rendered_mp4_path") and os.path.exists(last_clip["rendered_mp4_path"]):
                 target_mp4 = last_clip["rendered_mp4_path"]
                 clip_title = last_clip.get("title", clip_title)
-                clip_desc = last_clip.get("hook", clip_desc)
+                clip_hook = last_clip.get("hook", "")
+                clip_rationale = last_clip.get("rationale", "")
+                clip_hashtags = last_clip.get("hashtags", [])
 
             # Fallback: scan channel's shorts_clips directory for newest MP4
             if not target_mp4:
@@ -817,22 +949,41 @@ class MainWindow(ctk.CTk):
                 self.after(0, lambda: self.manual_upload_btn.configure(state="normal"))
                 return
 
-            self.logger.info(f"[Manual Upload] Uploading '{os.path.basename(target_mp4)}' to channel '{profile_name}' on YouTube...")
-            upload_res = publisher.upload_short(video_path=target_mp4, title=clip_title, description=clip_desc, privacy_status="private")
+            def _upload_progress_cb(pct: float, msg: str):
+                self.log_queue.put(("PROGRESS", pct / 100.0))
+                self.log_queue.put(("LOG", "INFO", f"[Manual Upload] {msg}"))
 
-            self.config_manager.mark_clip_uploaded(target_mp4, upload_res)
-            self.logger.info(f"[Manual Upload] Upload successful! YouTube URL: {upload_res.get('url')}")
+            self.logger.info(f"[Manual Upload] Publishing '{os.path.basename(target_mp4)}' across enabled social platforms for '{profile_name}'...")
+            multi_pub = MultiPlatformPublisher(self.config_manager, profile_name, logger=self.logger)
+            upload_res = multi_pub.publish_all(
+                video_path=target_mp4,
+                title=clip_title,
+                hook=clip_hook,
+                rationale=clip_rationale,
+                channel_name=profile_name,
+                hashtags=clip_hashtags,
+                progress_callback=_upload_progress_cb
+            )
 
-            # Schedule deletion in 1 hour
-            self.logger.info("[Manual Upload] Clip scheduled for automatic local deletion in 1 hour (record kept permanently).")
-            self.config_manager.schedule_file_deletion(target_mp4, delay_seconds=3600, clip_id=f"manual_{profile_name}")
+            success_count = upload_res.get("success_count", 0)
+            if success_count > 0:
+                self.config_manager.mark_clip_uploaded(target_mp4, upload_res, profile_name=profile_name)
+                platforms_list = [p.capitalize() for p in upload_res.get("platforms", [])]
+                platforms_str = ", ".join(platforms_list)
+                self.logger.info(f"[Manual Upload] Successfully published to: {platforms_str}!")
+                print(f"\n[Multi-Platform Success] Successfully published for '{profile_name}': {platforms_str}\n")
 
-            self.after(0, lambda: self.status_badge.configure(text=" UPLOADED ", fg_color="#00A8B5", text_color="#FFFFFF"))
-            self.after(0, lambda: messagebox.showinfo(
-                "Upload Complete",
-                f"Video successfully uploaded to YouTube for '{profile_name}'!\nURL: {upload_res.get('url')}\n\n"
-                "Note: The local video will be automatically deleted after 1 hour."
-            ))
+                # Schedule deletion in 1 hour
+                self.logger.info("[Manual Upload] Clip scheduled for automatic local deletion in 1 hour (record kept permanently).")
+                self.config_manager.schedule_file_deletion(target_mp4, delay_seconds=3600, clip_id=f"manual_{profile_name}")
+
+                self.after(0, lambda: self.status_badge.configure(text=" UPLOADED ", fg_color="#00A8B5", text_color="#FFFFFF"))
+                self.after(0, lambda: self.progress_label.configure(text=f"✅ Published to {platforms_str}"))
+            else:
+                err_dict = upload_res.get("errors", {})
+                err_msg = ", ".join(f"{k}: {v}" for k, v in err_dict.items()) if err_dict else "No platforms enabled or credentials provided."
+                self.logger.warning(f"[Manual Upload] Upload not completed: {err_msg}")
+                self.after(0, lambda: messagebox.showwarning("Upload Warning", f"Upload could not be completed:\n\n{err_msg}"))
 
         except Exception as e:
             self.logger.error(f"[Manual Upload] Upload failed: {e}")

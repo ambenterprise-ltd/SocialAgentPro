@@ -23,11 +23,12 @@ class MediaIngestionEngine:
         opts = {
             "nocheckcertificate": True,
             "geo_bypass": True,
+            "geo_bypass_country": "US",
             "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
             "http_headers": {
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
                 "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                "Accept-Language": "en-us,en;q=0.5",
+                "Accept-Language": "en-US,en;q=0.9",
             },
             "js_runtimes": {
                 "node": {},
@@ -67,11 +68,12 @@ class MediaIngestionEngine:
     def fetch_channel_recent_videos(
         self,
         channel_url: str,
-        limit: int = 15
+        limit: int = 25,
+        min_duration: int = 300
     ) -> List[Dict[str, Any]]:
         """
         Ultra-Fast Flat Scraping: Fetches only the metadata of the `limit` most recent videos from a channel.
-        Does not download video streams or index entire playlists.
+        Excludes YouTube Shorts and short videos shorter than min_duration (default 300s / 5 min).
         """
         if not channel_url:
             raise ValueError("No Target Channel URL provided! Please set one in Admin Settings.")
@@ -80,7 +82,7 @@ class MediaIngestionEngine:
         if not base_url.endswith('/videos'):
             base_url += '/videos'
 
-        self.logger.info(f"[Ingestion] Ultra-fast flat scraping {limit} recent videos from: {base_url}...")
+        self.logger.info(f"[Ingestion] Ultra-fast flat scraping {limit} recent videos from: {base_url} (min_duration={min_duration}s)...")
 
         ydl_opts = {
             "quiet": True,
@@ -101,42 +103,87 @@ class MediaIngestionEngine:
         videos = []
         for entry in entries:
             v_id = entry.get("id")
-            if v_id:
-                videos.append({
-                    "id": v_id,
-                    "title": entry.get("title", "Unknown Title"),
-                    "url": f"https://www.youtube.com/watch?v={v_id}",
-                    "duration": entry.get("duration", 0),
-                    "view_count": entry.get("view_count", 0) or 0
-                })
+            if not v_id:
+                continue
 
-        self.logger.info(f"[Ingestion] Extracted {len(videos)} video candidates in seconds.")
+            title = entry.get("title", "Unknown Title")
+            url = f"https://www.youtube.com/watch?v={v_id}"
+            webpage_url = entry.get("webpage_url", url)
+            dur = entry.get("duration", 0) or 0
+
+            # Filter out YouTube Shorts by URL and hashtag
+            if "/shorts/" in webpage_url.lower() or "/shorts/" in url.lower():
+                self.logger.info(f"[Ingestion] Excluding channel video '{title}' ({v_id}): YouTube Shorts URL.")
+                continue
+            if "#shorts" in title.lower() or "#short" in title.lower():
+                self.logger.info(f"[Ingestion] Excluding channel video '{title}' ({v_id}): #shorts hashtag.")
+                continue
+
+            # Filter out videos shorter than min_duration (if duration is known)
+            if dur and 0 < dur < min_duration:
+                self.logger.info(f"[Ingestion] Excluding channel video '{title}' ({v_id}): duration {dur}s < {min_duration}s.")
+                continue
+
+            videos.append({
+                "id": v_id,
+                "title": title,
+                "url": url,
+                "duration": dur,
+                "view_count": entry.get("view_count", 0) or 0
+            })
+
+        self.logger.info(f"[Ingestion] Extracted {len(videos)} valid long-form video candidates in seconds.")
         return videos
 
     def search_youtube_topic_podcasts(
         self,
         search_queries: List[str],
-        limit: int = 15
+        limit: int = 25,
+        negative_filters: Optional[List[str]] = None,
+        min_duration: int = 300,
+        target_count: int = 25,
+        language: str = "en"
     ) -> List[Dict[str, Any]]:
         """
         Searches YouTube directly for topic-focused podcasts/interviews using auto_search_keywords.
+        Filters out YouTube Shorts and short videos (< min_duration, default 300s).
+        Enforces English queries and filters out regional Hindi/Urdu candidates when language is English.
+        Applies negative keyword filters to exclude off-topic candidate videos.
+        Accumulates candidates across multiple search queries up to target_count.
         Returns a list of candidate video dictionaries.
         """
         if not search_queries:
-            search_queries = ["wealth secrets podcast", "business advice podcast interview"]
+            search_queries = ["wealth secrets English podcast interview full episode", "business advice English podcast interview"]
 
-        import random
         queries_to_try = [q for q in search_queries if q and str(q).strip()]
         if not queries_to_try:
-            queries_to_try = ["wealth secrets podcast"]
-        random.shuffle(queries_to_try)
+            queries_to_try = ["wealth secrets English podcast interview full episode"]
+
+        # If English mode is active, enforce English in queries to avoid regional bias
+        if language == "en":
+            queries_to_try = [
+                q if "english" in q.lower() else f"{q} English"
+                for q in queries_to_try
+            ]
+
+        all_candidates: List[Dict[str, Any]] = []
+        seen_ids = set()
+        regional_exclusions = [
+            "hindi", "urdu", "ankur warikoo", "warikoo",
+            "raj shamani", "ranveer", "tanmay", "marwari",
+            "crorepati", "indian", "india"
+        ]
 
         for query in queries_to_try:
-            self.logger.info(f"[Ingestion] Performing YouTube topic search for: '{query}' (limit={limit})...")
+            if len(all_candidates) >= target_count:
+                break
+
+            self.logger.info(f"[Ingestion] Performing YouTube topic search for: '{query}' (limit={limit}, min_dur={min_duration}s, lang={language})...")
             ydl_opts = {
                 "quiet": True,
                 "no_warnings": True,
                 "extract_flat": True,
+                "geo_bypass_country": "US",
                 **self.get_anti_403_headers()
             }
             try:
@@ -144,44 +191,86 @@ class MediaIngestionEngine:
                     search_results = ydl.extract_info(f"ytsearch{limit}:{query}", download=False)
                     entries = search_results.get("entries", [])
 
-                videos = []
                 for entry in entries:
                     if not entry:
                         continue
                     v_id = entry.get("id")
-                    if v_id:
-                        videos.append({
-                            "id": v_id,
-                            "title": entry.get("title", "Unknown Title"),
-                            "url": f"https://www.youtube.com/watch?v={v_id}",
-                            "duration": entry.get("duration", 0),
-                            "view_count": entry.get("view_count", 0) or 0
-                        })
-                if videos:
-                    self.logger.info(f"[Ingestion] Discovered {len(videos)} candidates matching topic query '{query}'.")
-                    return videos
+                    if not v_id or v_id in seen_ids:
+                        continue
+
+                    title = entry.get("title", "Unknown Title")
+                    url = f"https://www.youtube.com/watch?v={v_id}"
+                    webpage_url = entry.get("webpage_url", url)
+                    dur = entry.get("duration", 0) or 0
+                    title_lower = title.lower()
+
+                    # Filter out YouTube Shorts by URL and hashtag
+                    if "/shorts/" in webpage_url.lower() or "/shorts/" in url.lower():
+                        self.logger.info(f"[Ingestion] Excluding search candidate '{title}' ({v_id}): YouTube Shorts URL.")
+                        continue
+                    if "#shorts" in title.lower() or "#short" in title.lower():
+                        self.logger.info(f"[Ingestion] Excluding search candidate '{title}' ({v_id}): #shorts hashtag.")
+                        continue
+
+                    # Filter out short videos under min_duration (5 minutes)
+                    if dur and 0 < dur < min_duration:
+                        self.logger.info(f"[Ingestion] Excluding search candidate '{title}' ({v_id}): duration {dur}s < {min_duration}s.")
+                        continue
+
+                    # Filter out regional Hindi/Urdu videos when English is requested
+                    if language == "en" and any(reg in title_lower for reg in regional_exclusions):
+                        self.logger.info(f"[Ingestion] Excluding regional Hindi/Urdu candidate '{title}' ({v_id}).")
+                        continue
+
+                    # Apply negative filters / exclusions
+                    if negative_filters and title:
+                        if any(neg.lower() in title_lower for neg in negative_filters):
+                            self.logger.info(f"[Ingestion] Excluding search candidate '{title}' matching negative filter.")
+                            continue
+
+                    seen_ids.add(v_id)
+                    all_candidates.append({
+                        "id": v_id,
+                        "title": title,
+                        "url": url,
+                        "duration": dur,
+                        "view_count": entry.get("view_count", 0) or 0
+                    })
+
+                    if len(all_candidates) >= target_count:
+                        break
+
             except Exception as e:
                 self.logger.warning(f"[Ingestion] Topic search query '{query}' failed: {e}. Trying next query...")
 
-        return []
+        self.logger.info(f"[Ingestion] Total discovered candidates across queries: {len(all_candidates)} (Target: {target_count}).")
+        return all_candidates
 
     def auto_fetch_channel_video(
         self,
         channel_url: str,
         processed_history: List[str],
         fetch_strategy: str = "Viral (Most Viewed)",
-        topic_keywords: Optional[List[str]] = None
+        topic_keywords: Optional[List[str]] = None,
+        negative_filters: Optional[List[str]] = None,
+        min_duration: int = 300
     ) -> Dict[str, Any]:
         """
-        Ultra-Fast Channel Discovery: Fetches top 15 recent videos, filters out processed videos,
-        and returns the best candidate according to topic relevance and fetch_strategy.
+        Ultra-Fast Channel Discovery: Fetches top 25 recent videos, filters out processed videos,
+        excludes negative filter terms, excludes Shorts (< min_duration), and returns the best candidate.
         """
-        candidates = self.fetch_channel_recent_videos(channel_url, limit=15)
+        candidates = self.fetch_channel_recent_videos(channel_url, limit=25, min_duration=min_duration)
         
         valid_entries = [c for c in candidates if c["id"] not in processed_history]
 
+        if negative_filters:
+            valid_entries = [
+                c for c in valid_entries
+                if not any(neg.lower() in c.get("title", "").lower() for neg in negative_filters)
+            ]
+
         if not valid_entries:
-            raise ValueError(f"No new unique videos found in the 15 most recent videos of {channel_url}. All have been processed or skipped.")
+            raise ValueError(f"No new unique videos found in the 25 most recent videos of {channel_url}. All have been processed or skipped.")
 
         # If topic keywords are provided, prioritize videos whose title matches topic keywords
         if topic_keywords:

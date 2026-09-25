@@ -21,7 +21,7 @@ from core.ingestion import MediaIngestionEngine
 from core.transcriber import WhisperTranscriber
 from core.llm_brain import ViralClipExtractor
 from core.composer import FFmpegComposer
-from core.publisher import YouTubePublisher
+from core.publisher import MultiPlatformPublisher, YouTubePublisher, FacebookPublisher, InstagramPublisher
 
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -51,7 +51,7 @@ class ShortsAutomationPipeline:
     def _extract_topic_keywords(topic_focus: str, auto_search_keywords: Optional[List[str]] = None) -> Set[str]:
         """
         Derives a rich set of topic keywords from topic_focus and auto_search_keywords,
-        enriched with standard financial, wealth, and business concepts while filtering stopwords.
+        enriched with domain-specific concepts across wealth, food vlogging, and fitness nutrition.
         """
         stopwords = {
             "and", "the", "for", "with", "how", "what", "clip", "show", "podcast", "video", "youtube",
@@ -60,7 +60,24 @@ class ShortsAutomationPipeline:
             "why", "when", "where", "can", "will", "would", "could", "should", "your", "them", "some"
         }
 
-        base_lexicon = {
+        topic_lower = (topic_focus or "").lower()
+        base_lexicon: Set[str] = set()
+
+        # Channel & Niche-specific enrichment lexicons
+        food_lexicon = {
+            "food", "recipe", "recipes", "dish", "dishes", "restaurant", "restaurants", "desi",
+            "taste", "review", "street", "pakistani", "karahi", "biryani", "nihari", "bbq",
+            "spicy", "flavor", "cooking", "chef", "eat", "eating", "foodie", "kebab", "roti",
+            "vlog", "vlogging", "cafe", "dhaba", "haleem", "chai", "paratha", "khao"
+        }
+        fitness_lexicon = {
+            "supplement", "supplements", "gym", "bodybuilding", "workout", "lifting", "lift",
+            "creatine", "preworkout", "pre-workout", "whey", "protein", "gains", "muscle",
+            "mass", "hypertrophy", "shaker", "barbell", "dumbbell", "bench", "deadlift", "squat",
+            "pump", "tren", "intensity", "motivation", "energy", "tier", "transformation",
+            "raw", "overload", "hardcore", "beast", "anabolic", "nutrilogic"
+        }
+        wealth_lexicon = {
             "wealth", "wealthy", "rich", "money", "millionaire", "millionaires", "billion", "billionaire",
             "billionaires", "business", "invest", "investing", "investment", "investments", "investor",
             "investors", "finance", "financial", "economy", "economic", "cash", "capital", "profit",
@@ -70,6 +87,13 @@ class ShortsAutomationPipeline:
             "debt", "fund", "funds", "equity", "sales", "selling", "pricing", "success", "successful",
             "career", "salary", "hustle", "mindset", "discipline", "negotiation", "earning", "earnings"
         }
+
+        if any(w in topic_lower for w in ["food", "khao", "restaurant", "vlog", "cuisine", "recipe"]):
+            base_lexicon.update(food_lexicon)
+        elif any(w in topic_lower for w in ["supplement", "gym", "nutri", "fitness", "health", "nutrition"]):
+            base_lexicon.update(fitness_lexicon)
+        else:
+            base_lexicon.update(wealth_lexicon)
 
         if topic_focus:
             for token in re.findall(r"\b[a-zA-Z]{3,}\b", topic_focus.lower()):
@@ -130,6 +154,12 @@ class ShortsAutomationPipeline:
 
         active_lang = language or self.config_manager.get_caption_language(chan_name)
         lang_code = self.config_manager.LANGUAGE_TO_CODE.get(str(active_lang).strip().lower(), self.config_manager.get_caption_language_code(chan_name))
+
+        # Enforce English for Wealth Secrets profile or wealth topic to prevent Urdu/Hindi language mismatch
+        if chan_name == "Wealth Secrets" or "wealth" in str(topic_focus or "").lower():
+            if not language or str(language).strip().lower() in ("urdu", "ur"):
+                active_lang = "English"
+                lang_code = "en"
 
         self.logger.info(f"=== STARTING HEADLESS 1-SHORT PIPELINE [Profile: '{chan_name}', Language: '{active_lang}'] ===")
 
@@ -218,6 +248,9 @@ class ShortsAutomationPipeline:
                 self.logger.info("[Pipeline] No Target Channel URL provided. Will use topic search keywords...")
 
             auto_kws = self.config_manager.get_channel_setting("auto_search_keywords", [], chan_name)
+            if not auto_kws:
+                ctx = self.config_manager.get_channel_context(chan_name)
+                auto_kws = ctx.get("auto_search_keywords", [])
             topic_keywords = self._extract_topic_keywords(topic, auto_kws)
 
             candidates = []
@@ -238,7 +271,8 @@ class ShortsAutomationPipeline:
                     reverse=True
                 )
 
-            self.logger.info(f"[Pipeline] Evaluating {len(unprocessed)} unprocessed candidates for topic '{topic}'...")
+            negative_filters = self.config_manager.get_negative_filters(chan_name)
+            self.logger.info(f"[Pipeline] Evaluating {len(unprocessed)} unprocessed candidates for topic '{topic}' (Negative exclusions: {len(negative_filters)})...")
 
             # Iterate through channel candidates and validate transcript relevance
             for cand in unprocessed:
@@ -248,23 +282,58 @@ class ShortsAutomationPipeline:
 
                 cand_id = cand["id"]
                 cand_title = cand.get("title", cand_id)
+                cand_url = cand.get("url", f"https://www.youtube.com/watch?v={cand_id}")
+                cand_dur = cand.get("duration", 0) or 0
+
+                # Shorts & duration check (require >= 300s)
+                if "/shorts/" in cand_url.lower() or "#shorts" in cand_title.lower() or "#short" in cand_title.lower():
+                    self.logger.info(f"[Pipeline] Channel candidate '{cand_title}' ({cand_id}) is a Short. Skipping...")
+                    self.state_tracker.mark_failed(cand_id, reason="skipped_short")
+                    continue
+                if cand_dur and 0 < cand_dur < 300:
+                    self.logger.info(f"[Pipeline] Channel candidate '{cand_title}' ({cand_id}) duration ({cand_dur}s) < 300s. Skipping short video...")
+                    self.state_tracker.mark_failed(cand_id, reason="skipped_too_short")
+                    continue
+
+                # Regional Hindi/Urdu/Indian exclusion filter when English is required
+                if lang_code == "en":
+                    regional_exclusions = [
+                        "hindi", "urdu", "ankur warikoo", "warikoo",
+                        "raj shamani", "ranveer", "tanmay", "marwari",
+                        "crorepati", "indian", "india"
+                    ]
+                    if any(reg in cand_title.lower() for reg in regional_exclusions):
+                        self.logger.info(
+                            f"[Pipeline] Channel candidate '{cand_title}' ({cand_id}) matches regional Indian/South Asian filter. Skipping..."
+                        )
+                        self.state_tracker.mark_failed(cand_id, reason="skipped_regional_language")
+                        continue
+
+                # Negative filter exclusion check
+                if negative_filters and any(neg.lower() in cand_title.lower() for neg in negative_filters):
+                    self.logger.warning(
+                        f"[Pipeline] Candidate '{cand_title}' ({cand_id}) matches negative filter exclusion. Skipping off-niche candidate..."
+                    )
+                    self.state_tracker.mark_failed(cand_id, reason="skipped_negative_filter")
+                    continue
+
                 self.logger.info(f"[Pipeline] Checking headless transcript & topic relevance for '{cand_title}' ({cand_id})...")
                 cache_suffix = f"_{lang_code}" if lang_code != "en" else ""
                 cache_json = os.path.join(transcripts_dir, f"{cand_id}{cache_suffix}_transcript.json")
                 t_data = transcriber.fetch_headless_transcript(cand_id, cache_json_path=cache_json, language=lang_code)
 
                 if not t_data or not t_data.get("words"):
-                    self.logger.warning(f"[Pipeline] Video '{cand_id}' has no transcript available. Marking as 'failed_no_transcript'...")
+                    self.logger.warning(f"[Pipeline] Channel candidate '{cand_id}' has no transcript available. Marking as 'failed_no_transcript'...")
                     self.state_tracker.mark_failed(cand_id, reason="failed_no_transcript")
                     continue
 
                 words = t_data.get("words", [])
                 topic_mentions = self._count_transcript_topic_mentions(words, topic_keywords, max_seconds=1200.0)
 
-                # Pre-validation: Require at least 5 topic keyword mentions in the first 20 minutes
+                # Pre-validation: Require at least 3 topic keyword mentions in the first 20 minutes
                 # (or at least 1 keyword match in the title) to prevent wasting LLM calls on off-topic videos.
                 title_relevance = self._calculate_relevance(cand_title, topic_keywords)
-                if title_relevance == 0 and topic_mentions < 5:
+                if title_relevance == 0 and topic_mentions < 3:
                     self.logger.warning(
                         f"[Pipeline] Candidate '{cand_title}' ({cand_id}) has low/zero relevance to '{topic}' "
                         f"(Title matches: 0, Transcript topic mentions: {topic_mentions} in 20 min). Skipping off-topic candidate..."
@@ -273,7 +342,7 @@ class ShortsAutomationPipeline:
                     continue
 
                 video_id = cand_id
-                target_url = cand["url"]
+                target_url = cand_url
                 video_title = cand_title
                 transcript_data = t_data
                 self.logger.info(
@@ -282,21 +351,72 @@ class ShortsAutomationPipeline:
                 )
                 break
 
-            # Fallback to YouTube topic podcast discovery if channel candidates were off-topic or exhausted
+            # Fallback to YouTube topic discovery if channel candidates were off-topic or exhausted
             if not video_id or not transcript_data:
+                ctx = self.config_manager.get_channel_context(chan_name)
+                content_type = ctx.get("content_type", "podcast")
                 self.logger.info(
                     f"[Pipeline] Channel candidates were off-topic or exhausted. "
-                    f"Falling back to YouTube topic podcast discovery for '{topic}' using search keywords..."
+                    f"Falling back to YouTube topic {content_type} discovery for '{topic}' using search keywords..."
                 )
-                search_queries = auto_kws if auto_kws else [
-                    f"{topic} podcast",
-                    "wealth secrets podcast",
-                    "business advice podcast interview",
-                    "how to build wealth podcast",
-                    "money mindset podcast clip"
-                ]
-                topic_candidates = ingestion.search_youtube_topic_podcasts(search_queries=search_queries, limit=15)
+
+                # Tune topic search terms with full-length intent keywords and enforce American/US English
+                search_queries = []
+                if topic and topic.strip():
+                    topic_clean = topic.strip()
+                    if lang_code == "en":
+                        search_queries.append(f"{topic_clean} American {content_type} interview full episode US")
+                        search_queries.append(f"{topic_clean} American podcast interview US")
+                        search_queries.append(f"{topic_clean} American full episode interview US")
+                    else:
+                        search_queries.append(f"{topic_clean} {content_type} interview full episode")
+                        search_queries.append(f"{topic_clean} full episode interview")
+
+                if auto_kws:
+                    for kw in auto_kws:
+                        kw_clean = str(kw).strip()
+                        if not kw_clean:
+                            continue
+                        if lang_code == "en" and "american" not in kw_clean.lower() and "us" not in kw_clean.lower():
+                            kw_clean = f"{kw_clean} American US"
+                        if all(term not in kw_clean.lower() for term in ["full episode", "interview", "podcast"]):
+                            search_queries.append(f"{kw_clean} interview full episode")
+                        else:
+                            search_queries.append(kw_clean)
+                else:
+                    search_queries.extend(ctx.get("auto_search_keywords", [f"{topic} American {content_type} interview full episode US"]))
+
+                topic_candidates = ingestion.search_youtube_topic_podcasts(
+                    search_queries=search_queries,
+                    limit=25,
+                    negative_filters=negative_filters,
+                    min_duration=300,
+                    target_count=25,
+                    language=lang_code
+                )
                 unprocessed_search = self.state_tracker.filter_unprocessed(topic_candidates)
+
+                # Secondary search fallback if all initial candidates were already processed/failed
+                if not unprocessed_search:
+                    self.logger.warning(
+                        f"[Pipeline] All initial search candidates were already processed or skipped. "
+                        f"Attempting secondary broadened search for topic '{topic}'..."
+                    )
+                    secondary_queries = [
+                        f"{topic} American podcast full episode US",
+                        f"{topic} American interview full episode US",
+                        f"{content_type} {topic} American full video US",
+                        f"best {topic} American podcast conversation US"
+                    ]
+                    topic_candidates = ingestion.search_youtube_topic_podcasts(
+                        search_queries=secondary_queries,
+                        limit=30,
+                        negative_filters=negative_filters,
+                        min_duration=300,
+                        target_count=30,
+                        language=lang_code
+                    )
+                    unprocessed_search = self.state_tracker.filter_unprocessed(topic_candidates)
 
                 if not unprocessed_search:
                     raise ValueError(
@@ -317,13 +437,51 @@ class ShortsAutomationPipeline:
 
                     cand_id = cand["id"]
                     cand_title = cand.get("title", cand_id)
+                    cand_url = cand.get("url", f"https://www.youtube.com/watch?v={cand_id}")
+                    cand_dur = cand.get("duration", 0) or 0
+
+                    # Shorts & duration check (require >= 300s)
+                    if "/shorts/" in cand_url.lower() or "#shorts" in cand_title.lower() or "#short" in cand_title.lower():
+                        self.logger.info(f"[Pipeline] Search candidate '{cand_title}' ({cand_id}) is a Short. Skipping...")
+                        self.state_tracker.mark_failed(cand_id, reason="skipped_short")
+                        continue
+                    if cand_dur and 0 < cand_dur < 300:
+                        self.logger.info(f"[Pipeline] Search candidate '{cand_title}' ({cand_id}) duration ({cand_dur}s) < 300s. Skipping short video...")
+                        self.state_tracker.mark_failed(cand_id, reason="skipped_too_short")
+                        continue
+
+                    # Regional Hindi/Urdu/Indian exclusion filter when English is required
+                    if lang_code == "en":
+                        regional_exclusions = [
+                            "hindi", "urdu", "ankur warikoo", "warikoo",
+                            "raj shamani", "ranveer", "tanmay", "marwari",
+                            "crorepati", "indian", "india"
+                        ]
+                        if any(reg in cand_title.lower() for reg in regional_exclusions):
+                            self.logger.info(
+                                f"[Pipeline] Search candidate '{cand_title}' ({cand_id}) matches regional Indian/South Asian filter. Skipping..."
+                            )
+                            self.state_tracker.mark_failed(cand_id, reason="skipped_regional_language")
+                            continue
+
+                    # Negative filter exclusion check
+                    if negative_filters and any(neg.lower() in cand_title.lower() for neg in negative_filters):
+                        self.logger.warning(
+                            f"[Pipeline] Search candidate '{cand_title}' matches negative filter. Skipping off-niche candidate..."
+                        )
+                        self.state_tracker.mark_failed(cand_id, reason="skipped_negative_filter")
+                        continue
+
                     self.logger.info(f"[Pipeline] Checking transcript for topic search result: '{cand_title}' ({cand_id})...")
                     cache_suffix = f"_{lang_code}" if lang_code != "en" else ""
                     cache_json = os.path.join(transcripts_dir, f"{cand_id}{cache_suffix}_transcript.json")
                     t_data = transcriber.fetch_headless_transcript(cand_id, cache_json_path=cache_json, language=lang_code)
 
                     if not t_data or not t_data.get("words"):
-                        self.logger.warning(f"[Pipeline] Search candidate '{cand_id}' has no transcript. Marking as 'failed_no_transcript'...")
+                        self.logger.warning(
+                            f"[Pipeline] Search candidate '{cand_title}' ({cand_id}) has no extractable '{lang_code}' transcript. "
+                            f"Marking as 'failed_no_transcript' and testing next candidate..."
+                        )
                         self.state_tracker.mark_failed(cand_id, reason="failed_no_transcript")
                         continue
 
@@ -331,16 +489,16 @@ class ShortsAutomationPipeline:
                     topic_mentions = self._count_transcript_topic_mentions(words, topic_keywords, max_seconds=1200.0)
 
                     title_relevance = self._calculate_relevance(cand_title, topic_keywords)
-                    if title_relevance == 0 and topic_mentions < 5:
+                    if title_relevance == 0 and topic_mentions < 3:
                         self.logger.warning(
                             f"[Pipeline] Search candidate '{cand_title}' ({cand_id}) has low relevance "
-                            f"(Title matches: 0, Transcript mentions: {topic_mentions}). Skipping..."
+                            f"(Title matches: 0, Transcript mentions: {topic_mentions}). Skipping off-topic candidate..."
                         )
                         self.state_tracker.mark_failed(cand_id, reason="skipped_off_topic")
                         continue
 
                     video_id = cand_id
-                    target_url = cand["url"]
+                    target_url = cand_url
                     video_title = cand_title
                     transcript_data = t_data
                     self.logger.info(
@@ -350,7 +508,10 @@ class ShortsAutomationPipeline:
                     break
 
             if not video_id or not transcript_data:
-                raise ValueError(f"Could not find any available video with a valid transcript matching topic '{topic}'.")
+                raise ValueError(
+                    f"Could not find any available video with a valid transcript matching topic '{topic}'. "
+                    f"Tested and exhausted candidates in search pool."
+                )
 
         # --- PHASE 4: Groq LLM Clip Selection (50s - 58s) ---
         if stop_checker and stop_checker():
@@ -368,7 +529,8 @@ class ShortsAutomationPipeline:
             clip_count=1,
             topic_focus=topic,
             min_duration=min_dur,
-            max_duration=max_dur
+            max_duration=max_dur,
+            channel_name=chan_name
         )
 
         if not planned_clips:
@@ -410,14 +572,21 @@ class ShortsAutomationPipeline:
         captions_on = self.config_manager.get_channel_setting("enable_captions", True, chan_name)
         if captions_on:
             raw_words = transcript_data.get("words", []) if transcript_data else []
-            # Slice 100% accurate words from the high-precision Groq Whisper Large-V3 transcript (1,550M parameters)
-            sliced_words = [
-                dict(w) for w in raw_words
-                if float(w.get("start", 0)) >= (start_sec - 0.3) and float(w.get("end", 0)) <= (end_sec + 1.2)
-            ]
+            # Sync transcript data to clip's start time: filter words within [start_sec, end_sec]
+            # and subtract start_sec so the new clip captions start at 0.0 relative to the cut clip duration
+            sliced_words = []
+            for w in raw_words:
+                w_start = float(w.get("start", 0))
+                w_end = float(w.get("end", 0))
+                if w_end > start_sec and w_start < end_sec:
+                    offset_w = dict(w)
+                    offset_w["start"] = max(0.0, round(w_start - start_sec, 3))
+                    offset_w["end"] = min(round(duration_sec, 3), max(offset_w["start"] + 0.05, round(w_end - start_sec, 3)))
+                    sliced_words.append(offset_w)
+
             if sliced_words:
                 target_clip["aligned_words"] = sliced_words
-                self.logger.info(f"[Pipeline] Sliced {len(sliced_words)} high-precision words from Groq Whisper Large-V3 transcript for window [{start_sec:.1f}s - {end_sec:.1f}s].")
+                self.logger.info(f"[Pipeline] Sliced {len(sliced_words)} high-precision words synced to [0.0s - {duration_sec:.1f}s] (offset by -{start_sec:.1f}s).")
                 print(f"[Whisper Output] Successfully extracted {len(sliced_words)} segmented word strings for clip '{video_id}'.")
                 print(f"[Whisper Timestamps] First word: '{sliced_words[0].get('word')}' [{sliced_words[0].get('start', 0):.2f}s - {sliced_words[0].get('end', 0):.2f}s] | Last word: '{sliced_words[-1].get('word')}' [{sliced_words[-1].get('start', 0):.2f}s - {sliced_words[-1].get('end', 0):.2f}s]")
             elif os.path.exists(partial_raw_path):
@@ -434,14 +603,35 @@ class ShortsAutomationPipeline:
             return []
 
         out_w, out_h = self.config_manager.get_resolution_dimensions()
-        tpl_path = self.config_manager.get_channel_setting("template_path", "assets/wealth_secrets_template.png", chan_name)
-        if not tpl_path or not os.path.exists(tpl_path):
-            tpl_path = "assets/template.png"
+        
+        # Retrieve dynamic template path from active channel context dictionary
+        raw_tpl_path = self.config_manager.get_template_path(chan_name)
+        resolved_tpl_path = self.config_manager.resolve_asset_path(raw_tpl_path)
+
+        # Fallback / Safety Check: Wrap template loader with an os.path.exists() check
+        final_tpl_path = None
+        if resolved_tpl_path and os.path.exists(resolved_tpl_path):
+            final_tpl_path = resolved_tpl_path
+            self.logger.info(f"[Live Activity Log] 🎨 Loaded dynamic template overlay for '{chan_name}': {os.path.basename(final_tpl_path)}")
+        else:
+            default_fallback = self.config_manager.resolve_asset_path("assets/wealth secret template (2).jpg")
+            if default_fallback and os.path.exists(default_fallback):
+                self.logger.warning(
+                    f"[Live Activity Log] ⚠️ Template Warning: Dynamic template '{raw_tpl_path}' for channel '{chan_name}' "
+                    f"not found on disk. Falling back to default asset: {default_fallback}"
+                )
+                final_tpl_path = default_fallback
+            else:
+                self.logger.warning(
+                    f"[Live Activity Log] ⚠️ Template Warning: Dynamic template '{raw_tpl_path}' for channel '{chan_name}' "
+                    f"not found on disk. Proceeding with compositing without template overlay."
+                )
+                final_tpl_path = None
 
         composer = FFmpegComposer(
             output_width=out_w,
             output_height=out_h,
-            template_path=tpl_path,
+            template_path=final_tpl_path,
             ffmpeg_threads=hw["ffmpeg_threads"],
             ffmpeg_preset=hw["ffmpeg_preset"],
             ffmpeg_encoder_args=hw.get("ffmpeg_encoder_args"),
@@ -478,46 +668,59 @@ class ShortsAutomationPipeline:
         self.config_manager.add_processed_video(video_id)
         self.config_manager.record_generated_clip(target_clip, profile_name=chan_name)
 
-        # YouTube Upload if OAuth configured
-        yt_oauth_path = self.config_manager.get_channel_setting("youtube_oauth_json_path", "", chan_name).strip()
+        # Multi-Platform Publishing (YouTube, Facebook Reels, Instagram Reels)
         upload_successful = False
-        if yt_oauth_path and os.path.exists(yt_oauth_path):
-            self.logger.info("[Pipeline] YouTube OAuth configured. Attempting upload...")
-            try:
-                publisher = YouTubePublisher(client_secrets_file=yt_oauth_path, logger=self.logger)
-                if publisher.authenticate():
-                    desc = target_clip.get("rationale", "Automated 9:16 YouTube Short")
-                    upload_res = publisher.upload_short(
-                        video_path=final_mp4,
-                        title=clip_title,
-                        description=desc,
-                        privacy_status="private"
-                    )
-                    self.config_manager.mark_clip_uploaded(final_mp4, upload_res, profile_name=chan_name)
-                    self.logger.info("[Pipeline] Uploaded to YouTube: %s", upload_res.get("url"))
-                    upload_successful = True
+        try:
+            multi_pub = MultiPlatformPublisher(self.config_manager, chan_name, logger=self.logger)
+            pub_results = multi_pub.publish_all(
+                video_path=final_mp4,
+                title=clip_title,
+                hook=target_clip.get("hook", ""),
+                rationale=target_clip.get("rationale", ""),
+                channel_name=chan_name,
+                hashtags=target_clip.get("hashtags"),
+                progress_callback=progress_callback
+            )
+            success_count = pub_results.get("success_count", 0)
+            if success_count > 0:
+                self.config_manager.mark_clip_uploaded(final_mp4, pub_results, profile_name=chan_name)
+                platforms_list = [p.capitalize() for p in pub_results.get("platforms", [])]
+                platforms_str = ", ".join(platforms_list)
+                self.logger.info("[Pipeline] Successfully published to: %s", platforms_str)
+                print(f"\n[Multi-Platform Success] Published to {success_count} platform(s): {platforms_str}!\n")
+                upload_successful = True
 
-                    # ── Auto-Delete After Confirmed Upload ──────────────────
-                    # The upload returned a valid YouTube video ID — the file is
-                    # safely stored on YouTube servers. Delete local copy now to
-                    # free disk space immediately (critical on EC2 with limited EBS).
+                # ── Auto-Delete After Confirmed Upload ──────────────────
+                # The upload returned valid IDs — video is safely published on social platforms.
+                # Delete local copy now to free disk space immediately.
+                if not pub_results.get("errors"):
                     self.logger.info(
-                        "[Auto-Cleanup] Video '%s' confirmed uploaded to %s (%s). "
+                        "[Auto-Cleanup] Video '%s' confirmed uploaded to %s. "
                         "Deleting local file to free disk space...",
                         clip_title,
-                        upload_res.get("platform", "YouTube"),
-                        upload_res.get("url", "")
+                        platforms_str
                     )
                     self._cleanup_file_safely(final_mp4)
                     self.config_manager.mark_clip_deleted(final_mp4)
                     final_mp4 = ""  # Clear path to signal file is gone
-            except Exception as e:
-                self.logger.warning(
-                    "[Pipeline] YouTube upload error: %s. Local file preserved at: %s",
-                    e, final_mp4
-                )
-        else:
-            self.logger.info("[Pipeline] No YouTube OAuth configured. Video saved locally: %s", final_mp4)
+                else:
+                    self.logger.warning(
+                        "[Auto-Cleanup] Partial platform upload errors: %s. Local file preserved at: %s",
+                        pub_results["errors"], final_mp4
+                    )
+            else:
+                if pub_results.get("errors"):
+                    self.logger.warning(
+                        "[Pipeline] Upload failed with errors: %s. Local file preserved at: %s",
+                        pub_results["errors"], final_mp4
+                    )
+                else:
+                    self.logger.info("[Pipeline] No social platforms enabled or credentials provided. Video saved locally: %s", final_mp4)
+        except Exception as e:
+            self.logger.warning(
+                "[Pipeline] Multi-platform publishing error: %s. Local file preserved at: %s",
+                e, final_mp4
+            )
 
         # ── Temp Captions Cleanup ─────────────────────────────────────────────
         # After render completes (whether uploaded or not), clean up temp PNG folder

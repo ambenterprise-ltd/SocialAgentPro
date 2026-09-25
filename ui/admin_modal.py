@@ -1,5 +1,7 @@
 import os
-from typing import Optional, List, Dict, Any, Tuple
+import time
+import logging
+from typing import Optional, List, Dict, Any, Tuple, Callable
 import customtkinter as ctk
 from tkinter import filedialog, messagebox
 from config import ConfigManager
@@ -102,9 +104,18 @@ class AdminSettingsModal(ctk.CTkToplevel):
       Autopilot 1-24h interval, resolution dropdown, and clips configuration)
     """
 
-    def __init__(self, parent, config_manager: ConfigManager):
+    def __init__(
+        self,
+        parent,
+        config_manager: ConfigManager,
+        on_save_callback: Optional[Callable[[str], None]] = None,
+        on_profile_switch_callback: Optional[Callable[[str], None]] = None
+    ):
         super().__init__(parent)
         self.config_manager = config_manager
+        self.on_save_callback = on_save_callback
+        self.on_profile_switch_callback = on_profile_switch_callback
+        self.logger = logging.getLogger("AMBEnterprise")
 
         self.title("AMB Enterprise - Channel Profiles & Admin Settings")
         self.geometry("600x760")
@@ -214,7 +225,7 @@ class AdminSettingsModal(ctk.CTkToplevel):
         # Primary Groq Key
         ctk.CTkLabel(
             frame,
-            text="Default Groq API Key (Primary for this Profile)",
+            text="Default Groq API Key (Shared Across All Channels)",
             font=ctk.CTkFont(size=14, weight="bold")
         ).pack(anchor="w", pady=(5, 2))
 
@@ -238,7 +249,7 @@ class AdminSettingsModal(ctk.CTkToplevel):
         # Groq Keys Pool
         ctk.CTkLabel(
             frame,
-            text="Multiple Groq API Keys Pool (Failover Rotation)",
+            text="Multiple Groq API Keys Pool (Failover Rotation - Shared Across All Channels)",
             font=ctk.CTkFont(size=14, weight="bold")
         ).pack(anchor="w", pady=(5, 2))
 
@@ -290,7 +301,56 @@ class AdminSettingsModal(ctk.CTkToplevel):
             text="Checking YouTube OAuth...",
             font=ctk.CTkFont(size=12, weight="bold")
         )
-        self.token_status_label.pack(anchor="w", pady=(0, 10))
+        self.token_status_label.pack(anchor="w", pady=(0, 15))
+
+        # --- META GRAPH API CREDENTIALS (FACEBOOK & INSTAGRAM) ---
+        ctk.CTkLabel(
+            frame,
+            text="🌐 Meta Graph API Credentials (Facebook & Instagram Reels Publishing)",
+            font=ctk.CTkFont(size=14, weight="bold")
+        ).pack(anchor="w", pady=(10, 2))
+
+        ctk.CTkLabel(
+            frame,
+            text="Meta Access Token (Single unified token for both Facebook & Instagram):",
+            font=ctk.CTkFont(size=11),
+            text_color="gray"
+        ).pack(anchor="w", pady=(0, 2))
+
+        self.meta_token_entry = ctk.CTkEntry(
+            frame,
+            placeholder_text="EAAB... (Paste your Meta User / Page Access Token here)",
+            width=480
+        )
+        self.meta_token_entry.pack(anchor="w", pady=(0, 10))
+
+        ctk.CTkLabel(
+            frame,
+            text="Facebook Profile / Page ID:",
+            font=ctk.CTkFont(size=11),
+            text_color="gray"
+        ).pack(anchor="w", pady=(0, 2))
+
+        self.fb_page_id_entry = ctk.CTkEntry(
+            frame,
+            placeholder_text="e.g. 1029384756...",
+            width=480
+        )
+        self.fb_page_id_entry.pack(anchor="w", pady=(0, 10))
+
+        ctk.CTkLabel(
+            frame,
+            text="Instagram Profile / Account ID:",
+            font=ctk.CTkFont(size=11),
+            text_color="gray"
+        ).pack(anchor="w", pady=(0, 2))
+
+        self.ig_account_id_entry = ctk.CTkEntry(
+            frame,
+            placeholder_text="e.g. 1784140599...",
+            width=480
+        )
+        self.ig_account_id_entry.pack(anchor="w", pady=(0, 15))
 
     def _build_customization_tab(self):
         frame = ctk.CTkScrollableFrame(self.tab_custom)
@@ -315,7 +375,7 @@ class AdminSettingsModal(ctk.CTkToplevel):
 
         self.tpl_path_entry = ctk.CTkEntry(
             tpl_frame,
-            placeholder_text="assets/wealth_secrets_template.png",
+            placeholder_text="assets/wealth secret template (2).jpg",
             width=340
         )
         self.tpl_path_entry.pack(side="left", fill="x", expand=True, padx=(0, 8))
@@ -327,6 +387,47 @@ class AdminSettingsModal(ctk.CTkToplevel):
             command=self._browse_template_image
         )
         browse_tpl_btn.pack(side="left")
+
+        # --- MULTI-PLATFORM AUTO-UPLOADING (YOUTUBE, FACEBOOK, INSTAGRAM) ---
+        ctk.CTkLabel(
+            frame,
+            text="🚀 Multi-Platform Publishing Toggles",
+            font=ctk.CTkFont(size=14, weight="bold")
+        ).pack(anchor="w", pady=(5, 2))
+
+        ctk.CTkLabel(
+            frame,
+            text="Turn automatic publishing ON or OFF individually for each social platform:",
+            font=ctk.CTkFont(size=11),
+            text_color="gray"
+        ).pack(anchor="w", pady=(0, 6))
+
+        self.upload_yt_var = ctk.BooleanVar(value=True)
+        yt_upload_switch = ctk.CTkSwitch(
+            frame,
+            text="Upload to YouTube Shorts",
+            variable=self.upload_yt_var,
+            font=ctk.CTkFont(size=12, weight="bold")
+        )
+        yt_upload_switch.pack(anchor="w", pady=(0, 6))
+
+        self.upload_fb_var = ctk.BooleanVar(value=True)
+        fb_upload_switch = ctk.CTkSwitch(
+            frame,
+            text="Upload to Facebook Reels (Page)",
+            variable=self.upload_fb_var,
+            font=ctk.CTkFont(size=12, weight="bold")
+        )
+        fb_upload_switch.pack(anchor="w", pady=(0, 6))
+
+        self.upload_ig_var = ctk.BooleanVar(value=True)
+        ig_upload_switch = ctk.CTkSwitch(
+            frame,
+            text="Upload to Instagram Reels (Professional Account)",
+            variable=self.upload_ig_var,
+            font=ctk.CTkFont(size=12, weight="bold")
+        )
+        ig_upload_switch.pack(anchor="w", pady=(0, 15))
 
         # --- HARDWARE ENGINE & GPU STATUS ---
         ctk.CTkLabel(
@@ -656,11 +757,12 @@ class AdminSettingsModal(ctk.CTkToplevel):
 
     def _load_fields_for_profile(self, profile_name: str):
         """Populates all modal inputs with the settings of the selected profile."""
-        groq_key = self.config_manager.get_channel_setting("groq_api_key", "", profile_name)
+        # Groq API Keys (Shared Across Channels)
+        groq_key = self.config_manager.get_shared_groq_api_key()
         self.groq_key_entry.delete(0, "end")
         self.groq_key_entry.insert(0, groq_key)
 
-        pool_keys = self.config_manager.get_channel_setting("groq_api_keys_pool", [], profile_name)
+        pool_keys = self.config_manager.get_shared_groq_keys_pool()
         self.keys_textbox.delete("1.0", "end")
         self.keys_textbox.insert("1.0", "\n".join(pool_keys))
 
@@ -668,7 +770,7 @@ class AdminSettingsModal(ctk.CTkToplevel):
         self.yt_path_entry.delete(0, "end")
         self.yt_path_entry.insert(0, yt_path)
 
-        tpl_path = self.config_manager.get_channel_setting("template_path", "assets/wealth_secrets_template.png", profile_name)
+        tpl_path = self.config_manager.get_template_path(profile_name)
         self.tpl_path_entry.delete(0, "end")
         self.tpl_path_entry.insert(0, tpl_path)
 
@@ -741,10 +843,42 @@ class AdminSettingsModal(ctk.CTkToplevel):
         else:
             self.token_status_label.configure(text="⚠️ OAuth client_secret.json missing (Shorts will save locally on PC)", text_color="#D29922")
 
+        # Meta Graph API Credentials (Facebook & Instagram)
+        meta_tok = (
+            self.config_manager.get_channel_setting("meta_access_token", "", profile_name) or
+            self.config_manager.get_channel_setting("facebook_access_token", "", profile_name) or
+            self.config_manager.get_channel_setting("instagram_access_token", "", profile_name)
+        )
+        fb_page_id = self.config_manager.get_channel_setting("facebook_page_id", "", profile_name)
+        ig_account_id = self.config_manager.get_channel_setting("instagram_account_id", "", profile_name)
+
+        if hasattr(self, "meta_token_entry"):
+            self.meta_token_entry.delete(0, "end")
+            self.meta_token_entry.insert(0, meta_tok)
+        if hasattr(self, "fb_page_id_entry"):
+            self.fb_page_id_entry.delete(0, "end")
+            self.fb_page_id_entry.insert(0, fb_page_id)
+        if hasattr(self, "ig_account_id_entry"):
+            self.ig_account_id_entry.delete(0, "end")
+            self.ig_account_id_entry.insert(0, ig_account_id)
+
+        # Multi-Platform Upload Toggles
+        if hasattr(self, "upload_yt_var"):
+            self.upload_yt_var.set(self.config_manager.get_channel_setting("upload_to_youtube", True, profile_name))
+        if hasattr(self, "upload_fb_var"):
+            self.upload_fb_var.set(self.config_manager.get_channel_setting("upload_to_facebook", True, profile_name))
+        if hasattr(self, "upload_ig_var"):
+            self.upload_ig_var.set(self.config_manager.get_channel_setting("upload_to_instagram", True, profile_name))
+
     def _on_profile_switched(self, selected_profile: str):
         """Called when a user switches the profile dropdown."""
         self.config_manager.set_active_profile(selected_profile)
         self._load_fields_for_profile(selected_profile)
+        if getattr(self, "on_profile_switch_callback", None):
+            try:
+                self.on_profile_switch_callback(selected_profile)
+            except Exception:
+                pass
 
     def _on_admin_caption_language_change(self, val: str):
         """Immediately writes selected caption language directly to settings.json when modified by admin."""
@@ -893,9 +1027,8 @@ class AdminSettingsModal(ctk.CTkToplevel):
 
             new_pass = self.new_pass_entry.get().strip()
 
-            # Save channel-specific settings
-            self.config_manager.set_channel_setting("groq_api_key", groq_key, active_prof)
-            self.config_manager.set_channel_setting("groq_api_keys_pool", pool_keys, active_prof)
+            # Save shared Groq API keys (global & synced to all channels)
+            self.config_manager.set_shared_groq_keys(groq_key, pool_keys)
             self.config_manager.set_channel_setting("youtube_oauth_json_path", yt_path, active_prof)
             self.config_manager.set_channel_setting("template_path", tpl_path, active_prof)
             self.config_manager.set_channel_setting("resolution_preset", res_preset, active_prof)
@@ -904,9 +1037,53 @@ class AdminSettingsModal(ctk.CTkToplevel):
             self.config_manager.set_channel_setting("youtube_download_resolution", yt_res, active_prof)
             self.config_manager.set_channel_setting("enable_captions", captions_on, active_prof)
             self.config_manager.set_channel_setting("enable_face_tracking", face_on, active_prof)
+            # Save Meta Graph API Credentials (Single token, two profile IDs)
+            meta_token = self.meta_token_entry.get().strip() if hasattr(self, "meta_token_entry") else ""
+            fb_page_id = self.fb_page_id_entry.get().strip() if hasattr(self, "fb_page_id_entry") else ""
+            ig_account_id = self.ig_account_id_entry.get().strip() if hasattr(self, "ig_account_id_entry") else ""
+
+            self.config_manager.set_channel_setting("meta_access_token", meta_token, active_prof)
+            self.config_manager.set_channel_setting("facebook_access_token", meta_token, active_prof)
+            self.config_manager.set_channel_setting("instagram_access_token", meta_token, active_prof)
+            self.config_manager.set_channel_setting("facebook_page_id", fb_page_id, active_prof)
+            self.config_manager.set_channel_setting("instagram_account_id", ig_account_id, active_prof)
+
+            # Save Multi-Platform Upload Toggles
+            upload_yt = self.upload_yt_var.get() if hasattr(self, "upload_yt_var") else True
+            upload_fb = self.upload_fb_var.get() if hasattr(self, "upload_fb_var") else True
+            upload_ig = self.upload_ig_var.get() if hasattr(self, "upload_ig_var") else True
+            self.config_manager.set_channel_setting("upload_to_youtube", upload_yt, active_prof)
+            self.config_manager.set_channel_setting("upload_to_facebook", upload_fb, active_prof)
+            self.config_manager.set_channel_setting("upload_to_instagram", upload_ig, active_prof)
+
+            old_autopilot = self.config_manager.get_channel_setting("auto_pilot", False, active_prof)
+            old_interval = self.config_manager.get_channel_setting("autopilot_interval_hours", 2, active_prof)
+
             self.config_manager.set_channel_setting("autopilot_interval_hours", interval_h, active_prof)
             self.config_manager.set_channel_setting("target_clips_per_video", target_clips, active_prof)
             self.config_manager.set_channel_setting("auto_pilot", autopilot, active_prof)
+
+            now = time.time()
+            interval_secs = float(interval_h) * 3600
+            if autopilot:
+                last_run = float(self.config_manager.get_channel_setting("last_autopilot_run", 0, active_prof) or 0)
+                # When turning on or interval changed or uninitialized, start countdown from now (do not trigger immediately)
+                if not old_autopilot or interval_h != old_interval or last_run == 0:
+                    self.config_manager.set_channel_setting("last_autopilot_run", now, active_prof)
+                    next_run = now + interval_secs
+                    self.config_manager.set_channel_setting("next_autopilot_run", next_run, active_prof)
+                    scheduled_str = time.strftime("%H:%M:%S", time.localtime(next_run))
+                    self.logger.info(
+                        f"[Auto-Pilot] Autopilot ENABLED for '{active_prof}'. Selected interval: {interval_h} hour(s). "
+                        f"Next automated video scheduled in {interval_h} hour(s) at {scheduled_str}."
+                    )
+                else:
+                    next_run = last_run + interval_secs
+                    self.config_manager.set_channel_setting("next_autopilot_run", next_run, active_prof)
+            else:
+                self.config_manager.set_channel_setting("next_autopilot_run", 0, active_prof)
+                if old_autopilot:
+                    self.logger.info(f"[Auto-Pilot] Autopilot DISABLED for '{active_prof}'.")
             self.config_manager.set_channel_setting("target_channel_url", target_channel, active_prof)
             self.config_manager.set_channel_setting("fetch_strategy", fetch_strat, active_prof)
             if hasattr(self, "caption_language_combo"):
@@ -927,6 +1104,12 @@ class AdminSettingsModal(ctk.CTkToplevel):
 
             if new_pass:
                 self.config_manager.update_admin_password(new_pass)
+
+            if self.on_save_callback:
+                try:
+                    self.on_save_callback(active_prof)
+                except Exception as cb_err:
+                    pass
 
             messagebox.showinfo("Settings Saved", f"Settings for channel profile '{active_prof}' updated successfully!")
             self.destroy()

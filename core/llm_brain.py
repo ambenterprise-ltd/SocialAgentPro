@@ -530,7 +530,9 @@ class ViralClipExtractor:
         topic_focus: str,
         min_duration: float,
         max_duration: float,
-        custom_user_prompt: Optional[str] = None
+        custom_user_prompt: Optional[str] = None,
+        content_focus_description: Optional[str] = None,
+        channel_name: Optional[str] = None
     ) -> Tuple[int, List[Dict[str, Any]], Optional[Dict[str, Any]]]:
         """
         Processes a single transcript chunk with retry mechanism and error isolation.
@@ -539,16 +541,31 @@ class ViralClipExtractor:
         if custom_user_prompt:
             user_prompt = custom_user_prompt
         else:
+            focus_desc = content_focus_description or topic_focus
+            is_nutrilogic = (channel_name == "Nutrilogic Way") or ("bodybuilding" in str(topic_focus).lower())
+            if is_nutrilogic:
+                relevance_rule = (
+                    "2. HARDCORE GYM & BODYBUILDING FOCUS (STRICT RULE): The clip MUST deliver high-energy gym motivation, "
+                    "bodybuilding insights, heavy lifting PRs, or raw supplement breakdowns (pre-workout, creatine, whey, mass gains). "
+                    "STRICTLY FORBIDDEN: Reject and ignore textbook digestion explanations, dietary fiber, organic vegetables, "
+                    "or food pyramids. Hook the viewer immediately in the first 2 seconds!\n"
+                )
+            else:
+                relevance_rule = (
+                    f"2. CONTENT RELEVANCE OVER SENSATIONALISM: The clip MUST deliver a clear insight, lesson, breakdown, or practical wisdom on '{topic_focus}'. It does NOT need to be shocking clickbait or controversial drama. Thoughtful explanations or clear breakdowns are preferred.\n"
+                )
+
             user_prompt = (
                 f"Here is chunk {chunk_index} of the timestamped transcript (may be in English, Hindi, Urdu, or other languages):\n\n{chunk_text}\n\n"
                 f"MANDATORY REQUIREMENTS:\n"
-                f"1. Extract 1 to 2 high-value video clips focused on '{topic_focus}' (including wealth, money, markets, trading, business, investing, and financial mindset). Keep title and rationale concise (under 25 words each).\n"
-                f"2. CONTENT RELEVANCE OVER SENSATIONALISM: The clip MUST deliver a clear insight, lesson, market prediction, or practical wisdom on '{topic_focus}'. It does NOT need to be shocking clickbait or controversial drama. Thoughtful explanations or clear market breakdowns are preferred.\n"
+                f"1. Extract 1 to 2 high-value video clips focused on '{topic_focus}' (including {focus_desc}). Keep title and rationale concise (under 25 words each).\n"
+                f"{relevance_rule}"
                 f"3. STRICT UNDER-1-MINUTE RULE: Every clip's duration (end_time - start_time) MUST be between {min_duration:.1f}s and {max_duration:.1f}s.\n"
                 f"4. DEAD MINIMUM: {min_duration:.1f} SECONDS. NEVER select short snippets under {min_duration:.1f}s (no 10s, 20s, or 30s clips). Include the speaker's full explanation, story, and conclusion to naturally span 50 to 58 seconds.\n"
                 f"5. LANGUAGE SUPPORT: If the transcript is in Hindi, Urdu, or another language, keep the exact timestamps and hook, and provide an engaging English title and rationale.\n"
-                f"6. Output ONLY valid JSON. Do not include markdown formatting, code blocks, conversational text, or explanations.\n"
-                f"7. If no segment in this chunk relates to '{topic_focus}' or personal/financial success, output strictly: {{\"clips\": []}}."
+                f"6. VIRAL HASHTAGS: For each clip, include a 'hashtags' array with 5 to 8 niche-targeted viral hashtags starting with '#' (e.g. ['#shorts', '#wealth', '#business', '#money', '#mindset', '#billionaire', '#success']).\n"
+                f"7. Output ONLY valid JSON with structure: {{\"clips\": [{{\"title\": \"...\", \"hook\": \"...\", \"start_time\": float, \"end_time\": float, \"rationale\": \"...\", \"hashtags\": [\"#shorts\", ...]}}]}}.\n"
+                f"8. If no segment in this chunk relates to '{topic_focus}' or {focus_desc}, output strictly: {{\"clips\": []}}."
             )
 
         max_attempts = 3
@@ -614,6 +631,16 @@ class ViralClipExtractor:
                         score = float(c.get("topic_relevance_score") or c.get("viral_score") or 90)
                         c["topic_relevance_score"] = score
                         c["viral_score"] = score
+
+                        # Parse and clean hashtags
+                        raw_tags = c.get("hashtags", [])
+                        clean_tags = []
+                        if isinstance(raw_tags, list):
+                            for t in raw_tags:
+                                st = str(t).strip()
+                                if st:
+                                    clean_tags.append(st if st.startswith("#") else f"#{st}")
+                        c["hashtags"] = clean_tags
 
                         valid_chunk_clips.append(c)
                     except Exception as ce:
@@ -691,7 +718,8 @@ class ViralClipExtractor:
         topic_focus: str = "wealth and money concepts",
         min_duration: float = 50.0,
         max_duration: float = 58.0,
-        max_transcript_minutes: float = 20.0
+        max_transcript_minutes: float = 20.0,
+        channel_name: Optional[str] = None
     ) -> List[Dict[str, Any]]:
         """
         Queries Groq API with JSON mode enabled to find clips under 60 seconds (strictly 50s - 58s).
@@ -724,19 +752,30 @@ class ViralClipExtractor:
         transcript_chunks = self._chunk_transcript(formatted_transcript, max_words_per_chunk=1200)
         self.logger.info(f"[LLMBrain] Transcript split into {len(transcript_chunks)} chunks (~1200 words each, 20-min cap) for rapid parallel processing.")
 
+        # Dynamically resolve channel context for tailored prompt instructions
+        from config import ConfigManager
+        ctx = ConfigManager.get_channel_context(channel_name or topic_focus)
+        content_type = ctx.get("content_type", "video")
+        system_instruction = ctx.get(
+            "system_instruction",
+            f"You are an expert {content_type} analyst and video curator specializing in '{topic_focus}'."
+        )
+        content_desc = ctx.get("content_focus_description", topic_focus)
+        niche_name = ctx.get("niche_name", "Curated Niche")
+
         system_prompt = f"""
-You are an expert podcast analyst and video curator specializing in '{topic_focus}' (e.g. wealth, business secrets, investing, and money concepts).
-Your mission is to analyze the provided timestamped podcast transcript and extract insightful, high-retention short-form video segments following the STRICT "UNDER 1 MINUTE RULE".
+{system_instruction}
+Your mission is to analyze the provided timestamped transcript and extract insightful, high-retention short-form video segments for {niche_name} following the STRICT "UNDER 1 MINUTE RULE".
 
 CRITICAL FORMATTING INSTRUCTION:
 Output ONLY valid JSON. Do not include markdown formatting, code blocks, conversational text, or explanations.
-If no segment in this transcript chunk meets all criteria, output strictly: {{"clips\": []}}.
+If no segment in this transcript chunk meets all criteria, output strictly: {{"clips": []}}.
 
 MANDATORY RULES:
 1. CONTENT RELEVANCE OVER SENSATIONALISM:
    - The primary requirement is that the clip DELIVERS CLEAR, VALUABLE INSIGHT OR PRACTICAL KNOWLEDGE MATCHING '{topic_focus}'.
    - It is NOT required for the segment to be hyper-viral shock clickbait or controversial drama.
-   - High-retention educational value, money mindset wisdom, business principles, and career/wealth lessons are ideal.
+   - High-retention educational value, engaging breakdowns, expert reviews, and actionable lessons centered on {content_desc} are ideal.
 
 2. THE UNDER-1-MINUTE RETENTION RULE:
    - Every clip MUST have an exact duration between {min_duration:.1f}s and {max_duration:.1f}s (Target: 52s - 58s).
@@ -750,9 +789,9 @@ MANDATORY RULES:
    - 45-58s (The Takeaway): A clean conclusion, lesson, or philosophical takeaway that finishes the sentence naturally before {max_duration:.1f} seconds.
 
 4. TOPIC FOCUS & LANGUAGE SUPPORT:
-   - Clips MUST center around '{topic_focus}' (including wealth, money, trading, financial markets, investments, business, gold/silver, or success mindset).
+   - Clips MUST center around '{topic_focus}' (including {content_desc}).
    - The transcript may be in English, Hindi, Urdu, or other languages. Preserve original timestamps and hook, and provide an engaging English title and rationale.
-   - If the chunk touches on market predictions, trading, personal growth, financial discipline, decision-making, work ethic, entrepreneurship, or economics, extract the best coherent 50-58 second segment.
+   - If the chunk touches on key themes of {content_desc}, extract the best coherent 50-58 second segment.
 
 5. TIMESTAMP ACCURACY:
    - `start_time` starts at the exact beginning of the opening thought.
@@ -762,14 +801,14 @@ You MUST respond strictly with a valid JSON object following this exact schema:
 {{
   "clips": [
     {{
-      "title": "A clear, compelling title reflecting the wealth/business insight",
+      "title": "A clear, compelling title reflecting the {niche_name} insight or review",
       "hook": "The exact opening statement text",
       "start_time": 109.8,
       "end_time": 166.2,
       "duration": 56.4,
       "topic_relevance_score": 95,
       "viral_score": 95,
-      "rationale": "One brief sentence explaining the wealth or business lesson."
+      "rationale": "One brief sentence explaining the insight or review value."
     }}
   ]
 }}
@@ -797,7 +836,9 @@ You MUST respond strictly with a valid JSON object following this exact schema:
                     system_prompt=system_prompt,
                     topic_focus=topic_focus,
                     min_duration=min_duration,
-                    max_duration=max_duration
+                    max_duration=max_duration,
+                    content_focus_description=content_desc,
+                    channel_name=ctx.get("channel_name", channel_name)
                 ): i + 1
                 for i, chunk in enumerate(transcript_chunks)
             }

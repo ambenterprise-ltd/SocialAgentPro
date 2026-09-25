@@ -5,7 +5,14 @@ import logging
 import math
 import time
 from typing import Dict, Any, List, Optional, Union
-from youtube_transcript_api import YouTubeTranscriptApi
+from youtube_transcript_api import (
+    YouTubeTranscriptApi,
+    TranscriptsDisabled,
+    NoTranscriptFound,
+    VideoUnavailable,
+    CouldNotRetrieveTranscript,
+    YouTubeTranscriptApiException
+)
 from groq import Groq
 
 
@@ -77,6 +84,7 @@ class WhisperTranscriber:
         """
         Fetches and interpolates native youtube transcript in target language.
         Strictly generates captions in the native spoken language of the video without auto-translation.
+        Checks both manually created and auto-generated transcripts with dialect support.
         """
         try:
             lang_code = resolve_language_code(target_language)
@@ -86,7 +94,7 @@ class WhisperTranscriber:
 
             # Regional dialect codes for target language
             dialect_map = {
-                "en": ['en', 'en-US', 'en-GB', 'en-CA', 'en-IN', 'en-AU'],
+                "en": ['en', 'en-US', 'en-GB', 'en-CA', 'en-AU', 'en-IN', 'en-NZ', 'en-IE', 'en-ZA'],
                 "es": ['es', 'es-ES', 'es-419', 'es-MX', 'es-US'],
                 "ur": ['ur', 'ur-PK'],
                 "ar": ['ar', 'ar-SA', 'ar-EG', 'ar-AE'],
@@ -102,25 +110,55 @@ class WhisperTranscriber:
 
             try:
                 ytt = YouTubeTranscriptApi()
-                t_list = ytt.list(video_id)
-
                 try:
-                    t_obj = t_list.find_transcript(target_codes)
-                    raw_transcript = t_obj.fetch()
-                    detected_lang = t_obj.language_code
-                    self.logger.info(f"[FastTranscriber] Found native {target_language} transcript ({detected_lang}) for '{video_id}'.")
-                except Exception:
-                    self.logger.info(f"[FastTranscriber] No native transcript found in {target_codes} for '{video_id}'. Will use native multilingual Whisper fallback.")
+                    t_list = ytt.list(video_id)
+                except TranscriptsDisabled:
+                    self.logger.warning(f"[FastTranscriber] Transcripts are disabled for video '{video_id}'. Skipping...")
+                    return None
+                except VideoUnavailable:
+                    self.logger.warning(f"[FastTranscriber] Video '{video_id}' is unavailable, private, or removed. Skipping...")
+                    return None
+                except NoTranscriptFound:
+                    self.logger.warning(f"[FastTranscriber] No transcripts found on YouTube for video '{video_id}'. Skipping...")
+                    return None
+                except Exception as e_list:
+                    self.logger.warning(f"[FastTranscriber] Transcript listing not available for '{video_id}': {e_list}. Skipping...")
                     return None
 
-            except (AttributeError, TypeError):
+                t_obj = None
+                # 1. Try finding transcript matching target dialects (find_transcript checks manual first, then generated)
                 try:
-                    raw_transcript = YouTubeTranscriptApi.get_transcript(video_id, languages=target_codes)
-                except Exception:
-                    raw_transcript = None
-            except Exception as e_list:
-                self.logger.warning(f"[FastTranscriber] Transcript listing not available for '{video_id}': {e_list}")
-                raw_transcript = None
+                    t_obj = t_list.find_transcript(target_codes)
+                except NoTranscriptFound:
+                    pass
+                except Exception as e_find:
+                    self.logger.debug(f"[FastTranscriber] find_transcript failed with: {e_find}")
+
+                # 2. If not found, inspect all available transcripts for dialect prefix match (e.g. en-*)
+                if not t_obj:
+                    for t in t_list:
+                        if t.language_code.lower().startswith(lang_code.lower()):
+                            t_obj = t
+                            break
+
+                if not t_obj:
+                    avail_langs = [t.language_code for t in t_list]
+                    self.logger.info(f"[FastTranscriber] No native transcript found in {target_codes} for '{video_id}'. (Available languages: {avail_langs}).")
+                    return None
+
+                try:
+                    raw_transcript = t_obj.fetch()
+                    detected_lang = t_obj.language_code
+                    is_gen = getattr(t_obj, 'is_generated', False)
+                    gen_str = "auto-generated" if is_gen else "manually created"
+                    self.logger.info(f"[FastTranscriber] Found {gen_str} {target_language} transcript ({detected_lang}) for '{video_id}'.")
+                except (CouldNotRetrieveTranscript, YouTubeTranscriptApiException, Exception) as e_fetch:
+                    self.logger.warning(f"[FastTranscriber] Failed to fetch transcript data for '{video_id}': {e_fetch}")
+                    return None
+
+            except Exception as e_inner:
+                self.logger.warning(f"[FastTranscriber] Unexpected error fetching transcript for '{video_id}': {e_inner}")
+                return None
 
             if not raw_transcript:
                 return None
@@ -128,12 +166,25 @@ class WhisperTranscriber:
             words_list = []
             full_text = []
 
-            for entry in raw_transcript:
+            for i, entry in enumerate(raw_transcript):
                 start = float(getattr(entry, 'start', None) if hasattr(entry, 'start') else entry.get('start', 0.0))
                 dur = float(getattr(entry, 'duration', None) if hasattr(entry, 'duration') else entry.get('duration', 0.0))
-                end = start + dur
-                text = (getattr(entry, 'text', None) if hasattr(entry, 'text') else entry.get('text', '')).replace('\n', ' ')
+                text = (getattr(entry, 'text', None) if hasattr(entry, 'text') else entry.get('text', '')).replace('\n', ' ').strip()
+                if not text:
+                    continue
                 full_text.append(text)
+                
+                # Determine true spoken end time: YouTube display duration overlaps with subsequent snippets.
+                # If the next snippet starts before start + dur, clamp this snippet's end to next snippet's start.
+                if i + 1 < len(raw_transcript):
+                    next_start = float(getattr(raw_transcript[i+1], 'start', None) if hasattr(raw_transcript[i+1], 'start') else raw_transcript[i+1].get('start', 0.0))
+                    if next_start > start:
+                        end = min(start + dur, next_start)
+                    else:
+                        end = start + dur
+                else:
+                    end = start + dur
+
                 words_list.extend(self._interpolate_words(text, start, end))
 
             if not words_list:
@@ -220,11 +271,20 @@ class WhisperTranscriber:
                         cfg = json.load(f)
                     prof_name = cfg.get("active_profile", "Wealth Secrets")
                     prof = cfg.get("profiles", {}).get(prof_name, {})
-                    if prof.get("groq_api_key"):
-                        keys.append(prof["groq_api_key"])
-                    for pk in prof.get("groq_api_keys_pool", []):
+                    primary = cfg.get("groq_api_key") or prof.get("groq_api_key")
+                    if primary:
+                        keys.append(primary)
+                    for pk in cfg.get("groq_api_keys_pool", []) + prof.get("groq_api_keys_pool", []):
                         if pk and pk not in keys:
                             keys.append(pk)
+                    # If still empty, check all profiles
+                    if not keys:
+                        for p in cfg.get("profiles", {}).values():
+                            if p.get("groq_api_key") and p["groq_api_key"] not in keys:
+                                keys.append(p["groq_api_key"])
+                            for pk in p.get("groq_api_keys_pool", []):
+                                if pk and pk not in keys:
+                                    keys.append(pk)
             except Exception:
                 pass
         return keys
