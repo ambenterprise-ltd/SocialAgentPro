@@ -270,12 +270,26 @@ class ShortsAutomationPipeline:
             if target_channel:
                 self.logger.info(f"🔍 [Discovery] Checking recent videos from channel: {target_channel}...")
                 try:
-                    candidates = ingestion.fetch_channel_recent_videos(target_channel, limit=15)
+                    candidates = ingestion.fetch_channel_recent_videos(target_channel, limit=30)
                 except Exception as e:
                     self.logger.warning(f"[Pipeline] Failed to fetch recent videos from '{target_channel}': {e}")
 
             # Filter out processed & failed videos
             unprocessed = self.state_tracker.filter_unprocessed(candidates)
+
+            # If all recent 30 videos are processed/skipped, check retryable channel candidates or deep scrape
+            if not unprocessed and candidates:
+                self.logger.debug(f"[Pipeline] Initial channel videos seen. Checking retryable channel candidates...")
+                unprocessed = self.state_tracker.filter_unprocessed(candidates, allow_retry_failed=True)
+                if not unprocessed and target_channel:
+                    try:
+                        self.logger.info(f"🔍 [Discovery] Deep scraping channel '{target_channel}' (depth=60)...")
+                        more_candidates = ingestion.fetch_channel_recent_videos(target_channel, limit=60)
+                        unprocessed = self.state_tracker.filter_unprocessed(more_candidates, allow_retry_failed=True)
+                        if unprocessed:
+                            candidates = more_candidates
+                    except Exception as de:
+                        self.logger.debug(f"[Pipeline] Deep scrape failed: {de}")
 
             # Rank channel candidates by title relevance to topic keywords
             if unprocessed:
@@ -285,7 +299,7 @@ class ShortsAutomationPipeline:
                 )
 
             negative_filters = self.config_manager.get_negative_filters(chan_name)
-            self.logger.debug(f"[Pipeline] Evaluating {len(unprocessed)} unprocessed candidates for topic '{topic}'...")
+            self.logger.debug(f"[Pipeline] Evaluating {len(unprocessed)} candidate videos for topic '{topic}'...")
 
             # Iterate through channel candidates and validate transcript relevance
             for cand in unprocessed:
@@ -408,8 +422,8 @@ class ShortsAutomationPipeline:
 
                 # Secondary search fallback if all initial candidates were already processed/failed
                 if not unprocessed_search:
-                    self.logger.debug(
-                        f"[Pipeline] Initial candidates processed. Attempting secondary search for '{topic}'..."
+                    self.logger.info(
+                        f"🔍 [Discovery] Initial candidates processed. Expanding search for '{topic}'..."
                     )
                     secondary_queries = [
                         f"{topic} American podcast full episode US",
@@ -419,18 +433,60 @@ class ShortsAutomationPipeline:
                     ]
                     topic_candidates = ingestion.search_youtube_topic_podcasts(
                         search_queries=secondary_queries,
-                        limit=30,
+                        limit=35,
                         negative_filters=negative_filters,
                         min_duration=300,
-                        target_count=30,
+                        target_count=35,
                         language=lang_code
                     )
                     unprocessed_search = self.state_tracker.filter_unprocessed(topic_candidates)
 
+                # Tertiary dynamic search if all standard search results were seen
+                if not unprocessed_search:
+                    import random
+                    year_mods = ["2024", "2025", "recent", "exclusive", "masterclass", "insights"]
+                    chosen_mod = random.choice(year_mods)
+                    tertiary_queries = [
+                        f"{topic} {chosen_mod} podcast interview",
+                        f"{topic} full episode conversation",
+                        f"{topic} business advice interview"
+                    ]
+                    self.logger.info(f"🔍 [Discovery] Deep searching YouTube with dynamic queries: {tertiary_queries}...")
+                    topic_candidates = ingestion.search_youtube_topic_podcasts(
+                        search_queries=tertiary_queries,
+                        limit=50,
+                        negative_filters=negative_filters,
+                        min_duration=300,
+                        target_count=50,
+                        language=lang_code
+                    )
+                    unprocessed_search = self.state_tracker.filter_unprocessed(topic_candidates)
+
+                # Retry Fallback: Re-evaluate candidates that previously failed or were skipped (never published into shorts)
+                if not unprocessed_search:
+                    self.logger.info(
+                        f"⚡ [Discovery] Re-evaluating previously skipped candidates with advanced Whisper/yt-dlp engine..."
+                    )
+                    unprocessed_search = self.state_tracker.filter_unprocessed(topic_candidates, allow_retry_failed=True)
+
+                if not unprocessed_search and candidates:
+                    unprocessed_search = self.state_tracker.filter_unprocessed(candidates, allow_retry_failed=True)
+
+                # Ultimate Fallback: Broad global YouTube search
+                if not unprocessed_search:
+                    self.logger.info(f"🔍 [Discovery] Launching global YouTube search for '{topic}'...")
+                    broad_candidates = ingestion.search_youtube_topic_podcasts(
+                        search_queries=[f"{topic} podcast full episode", f"{topic} interview full"],
+                        limit=50,
+                        min_duration=180,
+                        target_count=50
+                    )
+                    unprocessed_search = self.state_tracker.filter_unprocessed(broad_candidates, allow_retry_failed=True)
+
                 if not unprocessed_search:
                     raise ValueError(
-                        f"No new unprocessed videos found matching topic '{topic}'. "
-                        f"All channel and search candidates have been processed or skipped."
+                        f"No new videos found matching topic '{topic}' across YouTube. "
+                        f"Please verify internet connectivity or try adjusting the topic focus."
                     )
 
                 # Rank search candidates by title topic match

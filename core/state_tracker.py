@@ -25,6 +25,8 @@ class VideoStateTracker:
             self.db_path = db_path
         self.logger = logger or logging.getLogger("AMBEnterprise")
         self._data = self._load()
+        # Auto-heal: unblock videos that previously failed due to cloud IP transcript blocks
+        self.clear_failed_reason("failed_no_transcript")
 
     def _load(self) -> Dict[str, Any]:
         """Loads state from JSON file with safe defaults."""
@@ -128,12 +130,30 @@ class VideoStateTracker:
         self._save()
         self.logger.info(f"[StateTracker] Marked video '{vid}' as skipped ({reason}).")
 
-    def filter_unprocessed(self, video_entries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Filters a list of candidate video dictionaries, returning only unprocessed ones."""
-        processed_set = self.get_processed_ids() | self.get_failed_ids()
+    def clear_failed_reason(self, reason: str = "failed_no_transcript") -> int:
+        """Clears entries in failed tracking that match a specific reason so they can be re-evaluated."""
+        failed = self._data.get("failed", {})
+        to_del = [vid for vid, info in failed.items() if (info.get("reason") if isinstance(info, dict) else info) == reason]
+        for vid in to_del:
+            del failed[vid]
+        if to_del:
+            self._save()
+            self.logger.info(f"[StateTracker] Cleared {len(to_del)} previously skipped '{reason}' videos for re-evaluation.")
+        return len(to_del)
+
+    def filter_unprocessed(self, video_entries: List[Dict[str, Any]], allow_retry_failed: bool = False) -> List[Dict[str, Any]]:
+        """
+        Filters a list of candidate video dictionaries, returning only unprocessed ones.
+        If allow_retry_failed=True, only videos successfully published into shorts are blocked.
+        """
+        if allow_retry_failed:
+            blocked_set = self.get_processed_ids()
+        else:
+            blocked_set = self.get_processed_ids() | self.get_failed_ids()
+
         unprocessed = []
         for v in video_entries:
             vid = v.get("id") or v.get("video_id")
-            if vid and str(vid).strip() not in processed_set:
+            if vid and str(vid).strip() not in blocked_set:
                 unprocessed.append(v)
         return unprocessed
