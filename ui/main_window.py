@@ -770,12 +770,12 @@ class MainWindow(ctk.CTk):
                 break
 
         now = time.time()
-        # Periodic 1-hour deletion check every 15 seconds
+        # Periodic 30-minute deletion check every 15 seconds
         if now - self.last_purge_check >= 15:
             self.last_purge_check = now
             purged = self.config_manager.check_and_purge_expired_files()
             if purged:
-                self.logger.info(f"[Auto-Cleanup] Purged {len(purged)} file(s) after 1-hour expiration window.")
+                self.logger.info(f"[Auto-Cleanup] Purged {len(purged)} file(s) after 30-minute expiration window.")
             self._refresh_state_info()
 
         # Update live countdown display every second
@@ -1042,9 +1042,9 @@ class MainWindow(ctk.CTk):
                 except Exception as ex:
                     self.logger.warning(f"[Manual Upload] Google Sheets logging skipped: {ex}")
 
-                # Schedule deletion in 1 hour
-                self.logger.info("[Manual Upload] Clip scheduled for automatic local deletion in 1 hour (record kept permanently).")
-                self.config_manager.schedule_file_deletion(target_mp4, delay_seconds=3600, clip_id=f"manual_{profile_name}")
+                # Schedule deletion in 30 minutes
+                self.logger.info("[Manual Upload] Clip scheduled for automatic local deletion in 30 minutes (record kept permanently).")
+                self.config_manager.schedule_file_deletion(target_mp4, delay_seconds=1800, clip_id=f"manual_{profile_name}")
 
                 self.after(0, lambda: self.status_badge.configure(text=" UPLOADED ", fg_color="#00A8B5", text_color="#FFFFFF"))
                 self.after(0, lambda: self.progress_label.configure(text=f"✅ Published to {platforms_str}"))

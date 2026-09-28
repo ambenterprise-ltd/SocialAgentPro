@@ -568,36 +568,25 @@ class ConfigManager:
             "face_focus_crop": True,
             "admin_password_hash": self.hash_password("admin123"),
             "output_directory": base_out,
-            "source_videos_directory": os.path.join(base_out, "source_videos"),
-            "transcripts_directory": os.path.join(base_out, "transcripts"),
-            "shorts_clips_directory": os.path.join(base_out, "shorts_clips"),
             "min_clip_duration": 50,
             "max_clip_duration": 58,
             "pending_deletions": []
         }
 
     def normalize_directories(self) -> None:
-        """Ensures directories exist and are accessible, correcting stale paths from other drives."""
+        """Ensures directories exist and are clean, organized strictly by profile."""
         base_dir = os.path.dirname(os.path.abspath(__file__))
         default_out = os.path.join(base_dir, "output")
 
-        current_out = self._config.get("output_directory", default_out)
-        drive = os.path.splitdrive(current_out)[0]
-        if drive and not os.path.exists(drive + "\\"):
-            current_out = default_out
-            self._config["output_directory"] = default_out
-            self._config["source_videos_directory"] = os.path.join(default_out, "source_videos")
-            self._config["transcripts_directory"] = os.path.join(default_out, "transcripts")
-            self._config["shorts_clips_directory"] = os.path.join(default_out, "shorts_clips")
-            self.save_config()
+        # Always bind output_directory to local project output folder
+        self._config["output_directory"] = default_out
+        for stale_k in ["source_videos_directory", "transcripts_directory", "shorts_clips_directory"]:
+            self._config.pop(stale_k, None)
+        self.save_config()
 
-        for k in ["output_directory", "source_videos_directory", "transcripts_directory", "shorts_clips_directory"]:
-            p = self._config.get(k)
-            if p:
-                try:
-                    os.makedirs(p, exist_ok=True)
-                except Exception:
-                    pass
+        os.makedirs(default_out, exist_ok=True)
+        # Automatically clean root junk and consolidate profile folders
+        self.clean_legacy_output_structure()
 
     def load_config(self) -> Dict[str, Any]:
         """Loads configuration from JSON file and automatically migrates single-profile setups."""
@@ -891,23 +880,133 @@ class ConfigManager:
         return list(self.SUPPORTED_CAPTION_FONTS)
 
     def get_channel_output_dirs(self, profile_name: Optional[str] = None) -> Dict[str, str]:
-        """Returns isolated directory paths for the specified channel profile."""
+        """Returns clean, isolated directory paths for the specified channel profile."""
         name = profile_name or self.get_active_profile_name()
         safe_name = re.sub(r'[^\w\s-]', '', name).strip() or "Default"
         base_out = self._config.get("output_directory", os.path.join(os.path.dirname(os.path.abspath(__file__)), "output"))
         chan_dir = os.path.join(base_out, safe_name)
+        source_dir = os.path.join(chan_dir, "source_videos")
+        transcripts_dir = os.path.join(source_dir, "transcripts")
+
         dirs = {
             "channel_dir": chan_dir,
-            "source_videos": os.path.join(chan_dir, "source_videos"),
-            "transcripts": os.path.join(chan_dir, "transcripts"),
-            "shorts_clips": os.path.join(chan_dir, "shorts_clips")
+            "source_videos": source_dir,
+            "transcripts": transcripts_dir,
+            "shorts_clips": chan_dir
         }
-        for p in dirs.values():
+        for p in [chan_dir, source_dir, transcripts_dir]:
             try:
                 os.makedirs(p, exist_ok=True)
             except Exception:
                 pass
         return dirs
+
+    def clean_legacy_output_structure(self) -> None:
+        """
+        Cleans and consolidates the output directory:
+        1. Removes root-level loose folders ('shorts_clips', 'source_videos', 'transcripts').
+        2. Inside each profile folder, consolidates to ONLY:
+           - 'source_videos/' (temporary working directory for raw chunks and transcript cache)
+           - Exactly 1 recently generated short (.mp4) in the channel folder
+        3. Migrates any existing shorts out of nested hash folders and deletes legacy folders.
+        """
+        import shutil
+        base_out = self._config.get("output_directory", os.path.join(os.path.dirname(os.path.abspath(__file__)), "output"))
+        if not os.path.exists(base_out):
+            return
+
+        # 1. Clean root-level loose directories
+        for root_junk in ["shorts_clips", "source_videos", "transcripts"]:
+            junk_path = os.path.join(base_out, root_junk)
+            if os.path.isdir(junk_path):
+                try:
+                    for root, _, files in os.walk(junk_path):
+                        for f in files:
+                            src = os.path.join(root, f)
+                            if root_junk == "shorts_clips" and f.endswith(".mp4") and not f.endswith("_raw.mp4"):
+                                active_dir = self.get_channel_output_dirs()["channel_dir"]
+                                dest = os.path.join(active_dir, f)
+                                if not os.path.exists(dest):
+                                    shutil.move(src, dest)
+                            elif root_junk == "transcripts" and f.endswith(".json"):
+                                active_tr = self.get_channel_output_dirs()["transcripts"]
+                                dest = os.path.join(active_tr, f)
+                                if not os.path.exists(dest):
+                                    shutil.move(src, dest)
+                    shutil.rmtree(junk_path, ignore_errors=True)
+                except Exception as e:
+                    self.logger.debug(f"[CleanOutput] Could not remove root junk folder {junk_path}: {e}")
+
+        # 2. Clean each profile folder
+        for prof_name in self.get_profiles_list():
+            dirs = self.get_channel_output_dirs(prof_name)
+            chan_dir = dirs["channel_dir"]
+            source_dir = dirs["source_videos"]
+            transcripts_dir = dirs["transcripts"]
+
+            # Migrate legacy profile-level 'transcripts' to 'source_videos/transcripts'
+            old_transcripts = os.path.join(chan_dir, "transcripts")
+            if os.path.isdir(old_transcripts) and os.path.abspath(old_transcripts) != os.path.abspath(transcripts_dir):
+                try:
+                    for f in os.listdir(old_transcripts):
+                        src = os.path.join(old_transcripts, f)
+                        dst = os.path.join(transcripts_dir, f)
+                        if not os.path.exists(dst) and os.path.isfile(src):
+                            shutil.move(src, dst)
+                    shutil.rmtree(old_transcripts, ignore_errors=True)
+                except Exception:
+                    pass
+
+            # Migrate legacy 'shorts_clips' subfolders to chan_dir
+            old_shorts_clips = os.path.join(chan_dir, "shorts_clips")
+            if os.path.isdir(old_shorts_clips) and os.path.abspath(old_shorts_clips) != os.path.abspath(chan_dir):
+                try:
+                    for root, _, files in os.walk(old_shorts_clips):
+                        for f in files:
+                            src = os.path.join(root, f)
+                            if f.endswith(".mp4") and not f.endswith("_raw.mp4"):
+                                dst = os.path.join(chan_dir, f)
+                                if not os.path.exists(dst):
+                                    shutil.move(src, dst)
+                            elif f.endswith(".ass"):
+                                dst = os.path.join(chan_dir, f)
+                                if not os.path.exists(dst):
+                                    shutil.move(src, dst)
+                    shutil.rmtree(old_shorts_clips, ignore_errors=True)
+                except Exception:
+                    pass
+
+            # Clean any stale temp raw chunks in source_dir
+            if os.path.isdir(source_dir):
+                for f in os.listdir(source_dir):
+                    if f.endswith("_raw.mp4") or f.endswith(".part") or f.endswith(".ytdl"):
+                        try:
+                            os.remove(os.path.join(source_dir, f))
+                        except Exception:
+                            pass
+
+            # Enforce 1-recent-short in chan_dir: keep the single newest short, clean older ones if uploaded or >30m
+            if os.path.isdir(chan_dir):
+                all_shorts = [
+                    os.path.join(chan_dir, f) for f in os.listdir(chan_dir)
+                    if f.endswith(".mp4") and not f.endswith("_raw.mp4") and os.path.isfile(os.path.join(chan_dir, f))
+                ]
+                if len(all_shorts) > 1:
+                    all_shorts.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+                    # all_shorts[0] is kept as the recent short
+                    now = time.time()
+                    for old_clip in all_shorts[1:]:
+                        is_uploaded = self.is_clip_uploaded(old_clip, prof_name)
+                        age = now - os.path.getmtime(old_clip)
+                        if is_uploaded or age > 1800:
+                            try:
+                                os.remove(old_clip)
+                                ass_f = old_clip.replace(".mp4", "_sub.ass")
+                                if os.path.exists(ass_f):
+                                    os.remove(ass_f)
+                                self.logger.info(f"[CleanOutput] Cleaned older short: {os.path.basename(old_clip)}")
+                            except Exception:
+                                pass
 
     def get(self, key: str, default: Any = None) -> Any:
         """Retrieve setting value, routing channel-specific keys to active profile."""
@@ -1081,17 +1180,24 @@ class ConfigManager:
         else:
             self.set("generated_clips_history", history)
 
-    def schedule_file_deletion(self, file_path: str, delay_seconds: int = 3600, clip_id: str = "", immediate: bool = False) -> None:
+    def is_clip_uploaded(self, mp4_path: str, profile_name: Optional[str] = None) -> bool:
+        """Returns True if the clip has been confirmed uploaded in history."""
+        history = self.get_channel_setting("generated_clips_history", [], profile_name) if profile_name else self.get("generated_clips_history", [])
+        for record in history:
+            if record.get("rendered_mp4_path") == mp4_path or record.get("title") == os.path.basename(mp4_path):
+                return bool(record.get("uploaded", False))
+        return False
+
+    def schedule_file_deletion(self, file_path: str, delay_seconds: int = 1800, clip_id: str = "", immediate: bool = False) -> None:
         """
-        Schedules a local clip file for deletion.
+        Schedules a local clip file for deletion after a retention window (default 30 minutes = 1800s).
 
         Args:
             file_path:      Absolute path to the file to delete.
-            delay_seconds:  Seconds to wait before deletion (default 1 hour = 3600s).
+            delay_seconds:  Seconds to wait before deletion (default 30 min = 1800s).
                             Ignored when immediate=True.
             clip_id:        Optional clip identifier for record-keeping.
-            immediate:      If True, delete the file immediately (used after confirmed
-                            social media upload to free disk space instantly).
+            immediate:      If True, delete the file immediately.
         """
         if not file_path or not os.path.exists(file_path):
             return
@@ -1124,7 +1230,7 @@ class ConfigManager:
         try:
             if os.path.exists(file_path):
                 os.remove(file_path)
-                print(f"[ConfigManager] Successfully deleted uploaded clip after 1-hour window: {file_path}")
+                print(f"[ConfigManager] Successfully deleted uploaded clip after 30-minute window: {file_path}")
             
             # Clean matching subtitle or temp files if any
             ass_path = file_path.replace(".mp4", "_sub.ass")

@@ -185,6 +185,8 @@ class ShortsAutomationPipeline:
 
         # Directories
         dirs = self.config_manager.get_channel_output_dirs(chan_name)
+        chan_dir = dirs["channel_dir"]
+        source_dir = dirs["source_videos"]
         transcripts_dir = dirs["transcripts"]
         shorts_dir = dirs["shorts_clips"]
 
@@ -698,8 +700,15 @@ class ShortsAutomationPipeline:
         yt_res_str = self.config_manager.get_channel_setting("youtube_download_resolution", "1080p", chan_name)
         yt_height = int(yt_res_str.replace("p", ""))
 
-        clip_work_dir = os.path.join(shorts_dir, video_id)
-        os.makedirs(clip_work_dir, exist_ok=True)
+        safe_chan = re.sub(r'[^\w\s-]', '', chan_name).strip().replace(' ', '_')
+        final_render_path = os.path.join(chan_dir, f"{safe_chan}_Short_{clip_idx + 1}_{video_id}.mp4")
+
+        # Enforce 1 recent short policy in channel folder
+        for old_mp4 in glob.glob(os.path.join(chan_dir, "*.mp4")):
+            if os.path.abspath(old_mp4) != os.path.abspath(final_render_path):
+                if self.config_manager.is_clip_uploaded(old_mp4, chan_name) or (time.time() - os.path.getmtime(old_mp4) > 1800):
+                    self._cleanup_file_safely(old_mp4)
+                    self.config_manager.mark_clip_deleted(old_mp4)
 
         out_w, out_h = self.config_manager.get_resolution_dimensions()
         raw_tpl_path = self.config_manager.get_template_path(chan_name)
@@ -757,7 +766,7 @@ class ShortsAutomationPipeline:
             f"({duration_sec:.1f}s: {start_sec:.1f}s - {end_sec:.1f}s)..."
         )
 
-        partial_raw_path = os.path.join(clip_work_dir, f"{video_id}_clip_{clip_idx + 1}_raw.mp4")
+        partial_raw_path = os.path.join(source_dir, f"temp_{video_id}_clip_{clip_idx + 1}_raw.mp4")
 
         try:
             ingestion.download_partial_video(
@@ -788,7 +797,6 @@ class ShortsAutomationPipeline:
                     accurate_words = transcriber.align_partial_clip_words(partial_raw_path, api_key=first_key, language=lang_code)
                     target_clip["aligned_words"] = accurate_words or []
 
-            final_render_path = os.path.join(clip_work_dir, f"{video_id}_short_{clip_idx + 1}.mp4")
             final_mp4 = composer.render_short_clip(
                 source_video_path=partial_raw_path,
                 clip_data=target_clip,
@@ -802,6 +810,8 @@ class ShortsAutomationPipeline:
             )
 
             self._cleanup_file_safely(partial_raw_path)
+            for tmp_chunk in glob.glob(os.path.join(source_dir, f"temp_{video_id}_*")):
+                self._cleanup_file_safely(tmp_chunk)
 
             target_clip["rendered_mp4_path"] = final_mp4
             target_clip["created_at"] = time.time()
@@ -828,9 +838,31 @@ class ShortsAutomationPipeline:
                     self.config_manager.mark_clip_uploaded(final_mp4, pub_results, profile_name=chan_name)
                     platforms_list = [p.capitalize() for p in pub_results.get("platforms", [])]
                     self.logger.info(f"🚀 [Publisher] Clip #{clip_idx + 1} published to {', '.join(platforms_list)}!")
-                    if not pub_results.get("errors"):
-                        self._cleanup_file_safely(final_mp4)
-                        self.config_manager.mark_clip_deleted(final_mp4)
+
+                    # Check if uploaded on ALL turned-on platforms
+                    upload_yt = self.config_manager.get_channel_setting("upload_to_youtube", True, chan_name)
+                    upload_fb = self.config_manager.get_channel_setting("upload_to_facebook", True, chan_name)
+                    upload_ig = self.config_manager.get_channel_setting("upload_to_instagram", True, chan_name)
+
+                    enabled_platforms = []
+                    if upload_yt: enabled_platforms.append("youtube")
+                    if upload_fb: enabled_platforms.append("facebook")
+                    if upload_ig: enabled_platforms.append("instagram")
+
+                    successful_platforms = pub_results.get("platforms", [])
+                    all_enabled_uploaded = bool(enabled_platforms and all(p in successful_platforms for p in enabled_platforms))
+
+                    if all_enabled_uploaded:
+                        self.config_manager.schedule_file_deletion(final_mp4, delay_seconds=1800, clip_id=f"{video_id}_{clip_idx + 1}")
+                        self.logger.info(
+                            f"⏳ [Auto-Cleanup] Successfully published to all turned-on platforms ({', '.join(platforms_list)})! "
+                            f"'{os.path.basename(final_mp4)}' will remain in '{chan_name}' for 30 minutes, then auto-delete."
+                        )
+                    else:
+                        pending_platforms = [p.capitalize() for p in enabled_platforms if p not in successful_platforms]
+                        self.logger.info(
+                            f"📁 [Auto-Cleanup] Kept '{os.path.basename(final_mp4)}' in '{chan_name}' folder (upload pending on: {', '.join(pending_platforms)})."
+                        )
             except Exception as pub_err:
                 self.logger.warning(f"[Pipeline] Publishing note for clip #{clip_idx + 1}: {pub_err}")
 
