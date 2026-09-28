@@ -217,8 +217,62 @@ class ShortsAutomationPipeline:
             )
         )
 
+        # Determine discovery mode & target channels from configuration
+        discovery_mode = self.config_manager.get_discovery_mode(chan_name)  # "hybrid", "channels_only", "keywords_only"
+        target_channels = self.config_manager.get_target_channels(chan_name)
+
+        if is_channel_url:
+            if manual_url not in target_channels:
+                target_channels.insert(0, manual_url)
+            self.logger.info(f"[Pipeline] Channel URL provided in dashboard: '{manual_url}'. Setting as primary target channel.")
+            self.config_manager.set_target_channels(target_channels, chan_name)
+            self.config_manager.save_config()
+
+        # Check active video state for Smart Resume (1 Short Per Scheduled Interval)
+        active_state = self.config_manager.get_channel_setting("active_video_state", {}, chan_name) or {}
+        active_vid = str(active_state.get("video_id", "")).strip()
+        active_completed = int(active_state.get("completed_clip_count", 0) or 0)
+        configured_target_clips = int(clip_count or self.config_manager.get_channel_setting("target_clips_per_video", 5, chan_name) or 5)
+        active_target = int(active_state.get("target_clip_count", 0) or configured_target_clips)
+        active_target = max(1, min(8, active_target))
+
+        is_resuming = False
+        planned_clips = []
+        locked_channel_idx = None
+        cache_suffix = f"_{lang_code}" if lang_code != "en" else ""
+
+        if not manual_url and active_vid and active_completed < active_target:
+            cache_json = os.path.join(transcripts_dir, f"{active_vid}{cache_suffix}_transcript.json")
+            planned_clips_file = os.path.join(transcripts_dir, f"{active_vid}_planned_clips.json")
+            if os.path.exists(cache_json):
+                try:
+                    with open(cache_json, "r", encoding="utf-8") as f:
+                        transcript_data = json.load(f)
+                    if transcript_data and transcript_data.get("words"):
+                        video_id = active_vid
+                        video_title = active_state.get("video_title", active_vid)
+                        target_url = active_state.get("target_url") or f"https://www.youtube.com/watch?v={video_id}"
+                        locked_channel_idx = active_state.get("channel_idx")
+                        if os.path.exists(planned_clips_file):
+                            try:
+                                with open(planned_clips_file, "r", encoding="utf-8") as pf:
+                                    planned_clips = json.load(pf)
+                            except Exception:
+                                planned_clips = []
+                        is_resuming = True
+                        ch_str = f" from Channel #{locked_channel_idx + 1}" if locked_channel_idx is not None else ""
+                        self.logger.info(
+                            f"⚡ [Smart Resume] Active video in progress: '{video_title}' ({video_id}){ch_str}. "
+                            f"Generating Short #{active_completed + 1} of {active_target} (Completed: {active_completed})..."
+                        )
+                except Exception as resume_err:
+                    self.logger.warning(f"[Smart Resume] Could not load resume cache for '{active_vid}': {resume_err}")
+                    is_resuming = False
+
         # --- PHASE 1 & 2: Ultra-Fast Discovery / State Filtering ---
-        if manual_url and not is_channel_url:
+        if is_resuming:
+            pass
+        elif manual_url and not is_channel_url:
             self.logger.info(f"[Pipeline] Using manually specified video URL: {manual_url}")
             match = re.search(r"(?:v=|\/|youtu\.be\/)([0-9A-Za-z_-]{11})", manual_url)
             if not match:
@@ -249,17 +303,6 @@ class ShortsAutomationPipeline:
             if not transcript_data or not transcript_data.get("words"):
                 raise ValueError(f"Could not retrieve or generate transcript for video '{video_id}'.")
         else:
-            # Determine discovery mode & target channels from configuration
-            discovery_mode = self.config_manager.get_discovery_mode(chan_name)  # "hybrid", "channels_only", "keywords_only"
-            target_channels = self.config_manager.get_target_channels(chan_name)
-
-            if is_channel_url:
-                if manual_url not in target_channels:
-                    target_channels.insert(0, manual_url)
-                self.logger.info(f"[Pipeline] Channel URL provided in dashboard: '{manual_url}'. Setting as primary target channel.")
-                self.config_manager.set_target_channels(target_channels, chan_name)
-                self.config_manager.save_config()
-
             auto_kws = self.config_manager.get_channel_setting("auto_search_keywords", [], chan_name)
             if not auto_kws:
                 ctx = self.config_manager.get_channel_context(chan_name)
@@ -598,27 +641,59 @@ class ShortsAutomationPipeline:
         if not key_pool:
             raise ValueError("No Groq API Keys configured! Please add a key in Admin Settings.")
 
-        # Determine clip count per video (defaults to 5, clamp 1-8)
-        target_clip_count = int(clip_count or self.config_manager.get_channel_setting("target_clips_per_video", 5, chan_name) or 5)
-        target_clip_count = max(1, min(8, target_clip_count))
+        planned_clips_file = os.path.join(transcripts_dir, f"{video_id}_planned_clips.json")
 
-        self.logger.info(f"🧠 [Brain] Querying Groq AI to extract top {target_clip_count} viral clips for '{video_id}'...")
-        clip_extractor = ViralClipExtractor(api_keys=key_pool, logger=self.logger)
-        planned_clips = clip_extractor.extract_viral_clips(
-            transcript_data=transcript_data,
-            clip_count=target_clip_count,
-            topic_focus=topic,
-            min_duration=min_dur,
-            max_duration=max_dur,
-            channel_name=chan_name
-        )
+        if not planned_clips or len(planned_clips) <= active_completed:
+            target_clip_count = int(clip_count or self.config_manager.get_channel_setting("target_clips_per_video", 5, chan_name) or 5)
+            target_clip_count = max(1, min(8, target_clip_count))
 
-        if not planned_clips:
-            self.logger.error("[Pipeline] Groq LLM could not find compliant 50-58s clips in this transcript.")
-            self.state_tracker.mark_failed(video_id, reason="failed_no_viral_clips")
+            self.logger.info(f"🧠 [Brain] Querying Groq AI to extract top {target_clip_count} viral clips for '{video_id}'...")
+            clip_extractor = ViralClipExtractor(api_keys=key_pool, logger=self.logger)
+            planned_clips = clip_extractor.extract_viral_clips(
+                transcript_data=transcript_data,
+                clip_count=target_clip_count,
+                topic_focus=topic,
+                min_duration=min_dur,
+                max_duration=max_dur,
+                channel_name=chan_name
+            )
+
+            if not planned_clips:
+                self.logger.error("[Pipeline] Groq LLM could not find compliant 50-58s clips in this transcript.")
+                self.state_tracker.mark_failed(video_id, reason="failed_no_viral_clips")
+                return []
+
+            try:
+                with open(planned_clips_file, "w", encoding="utf-8") as pf:
+                    json.dump(planned_clips, pf, indent=2)
+            except Exception as pe:
+                self.logger.debug(f"[Pipeline] Could not cache planned clips: {pe}")
+
+            active_target = len(planned_clips)
+            active_completed = 0
+            self.config_manager.set_channel_setting("active_video_state", {
+                "video_id": video_id,
+                "video_title": video_title,
+                "target_url": target_url,
+                "channel_idx": locked_channel_idx,
+                "target_clip_count": active_target,
+                "completed_clip_count": 0,
+                "status": "in_progress"
+            }, chan_name)
+            self.config_manager.save_config()
+        else:
+            active_target = len(planned_clips)
+
+        clip_idx = active_completed
+        if clip_idx >= len(planned_clips):
+            self.logger.warning(f"[Pipeline] Clip index {clip_idx} exceeds planned clips count {len(planned_clips)}. Marking video complete.")
+            self.state_tracker.mark_processed(video_id, title=video_title, metadata={"clips_generated": len(planned_clips)})
+            self.config_manager.add_processed_video(video_id, profile_name=chan_name)
+            self.config_manager.clear_active_video_state(chan_name)
             return []
 
-        self.logger.info(f"🎬 [Pipeline] Generating {len(planned_clips)} shorts from '{video_title}'...")
+        target_clip = planned_clips[clip_idx]
+        self.logger.info(f"🎬 [Pipeline] Generating Short #{clip_idx + 1} of {active_target} from '{video_title}'...")
 
         yt_res_str = self.config_manager.get_channel_setting("youtube_download_resolution", "1080p", chan_name)
         yt_height = int(yt_res_str.replace("p", ""))
@@ -668,139 +743,162 @@ class ShortsAutomationPipeline:
 
         completed_clips = []
 
-        for clip_idx, target_clip in enumerate(planned_clips):
-            if stop_checker and stop_checker():
-                self.logger.warning("Pipeline halted by user.")
-                break
+        if stop_checker and stop_checker():
+            self.logger.warning("Pipeline halted by user.")
+            return []
 
-            start_sec = float(target_clip["start_time"])
-            end_sec = float(target_clip["end_time"])
-            duration_sec = float(target_clip["duration"])
-            clip_title = target_clip.get("title", f"Short #{clip_idx + 1}")
+        start_sec = float(target_clip["start_time"])
+        end_sec = float(target_clip["end_time"])
+        duration_sec = float(target_clip["duration"])
+        clip_title = target_clip.get("title", f"Short #{clip_idx + 1}")
 
-            self.logger.info(
-                f"✂️ [Clip {clip_idx + 1}/{len(planned_clips)}] '{clip_title}' "
-                f"({duration_sec:.1f}s: {start_sec:.1f}s - {end_sec:.1f}s)..."
+        self.logger.info(
+            f"✂️ [Short {clip_idx + 1}/{active_target}] '{clip_title}' "
+            f"({duration_sec:.1f}s: {start_sec:.1f}s - {end_sec:.1f}s)..."
+        )
+
+        partial_raw_path = os.path.join(clip_work_dir, f"{video_id}_clip_{clip_idx + 1}_raw.mp4")
+
+        try:
+            ingestion.download_partial_video(
+                url=target_url,
+                start_sec=start_sec,
+                end_sec=end_sec,
+                output_path=partial_raw_path,
+                target_height=yt_height,
+                progress_callback=progress_callback
             )
 
-            partial_raw_path = os.path.join(clip_work_dir, f"{video_id}_clip_{clip_idx + 1}_raw.mp4")
+            if captions_on:
+                raw_words = transcript_data.get("words", []) if transcript_data else []
+                sliced_words = []
+                for w in raw_words:
+                    w_start = float(w.get("start", 0))
+                    w_end = float(w.get("end", 0))
+                    if w_end > start_sec and w_start < end_sec:
+                        offset_w = dict(w)
+                        offset_w["start"] = max(0.0, round(w_start - start_sec, 3))
+                        offset_w["end"] = min(round(duration_sec, 3), max(offset_w["start"] + 0.05, round(w_end - start_sec, 3)))
+                        sliced_words.append(offset_w)
 
+                if sliced_words:
+                    target_clip["aligned_words"] = sliced_words
+                elif os.path.exists(partial_raw_path):
+                    first_key = key_pool[0] if key_pool else None
+                    accurate_words = transcriber.align_partial_clip_words(partial_raw_path, api_key=first_key, language=lang_code)
+                    target_clip["aligned_words"] = accurate_words or []
+
+            final_render_path = os.path.join(clip_work_dir, f"{video_id}_short_{clip_idx + 1}.mp4")
+            final_mp4 = composer.render_short_clip(
+                source_video_path=partial_raw_path,
+                clip_data=target_clip,
+                output_mp4_path=final_render_path,
+                enable_captions=captions_on,
+                enable_face_tracking=face_on,
+                is_pre_cut=True,
+                language=active_lang,
+                caption_color=caption_color,
+                caption_font=caption_font
+            )
+
+            self._cleanup_file_safely(partial_raw_path)
+
+            target_clip["rendered_mp4_path"] = final_mp4
+            target_clip["created_at"] = time.time()
+            target_clip["video_id"] = video_id
+            target_clip["clip_index"] = clip_idx + 1
+
+            self.config_manager.record_generated_clip(target_clip, profile_name=chan_name)
+
+            # Publishing
+            pub_results = {}
             try:
-                ingestion.download_partial_video(
-                    url=target_url,
-                    start_sec=start_sec,
-                    end_sec=end_sec,
-                    output_path=partial_raw_path,
-                    target_height=yt_height,
+                multi_pub = MultiPlatformPublisher(self.config_manager, chan_name, logger=self.logger)
+                pub_results = multi_pub.publish_all(
+                    video_path=final_mp4,
+                    title=clip_title,
+                    hook=target_clip.get("hook", ""),
+                    rationale=target_clip.get("rationale", ""),
+                    channel_name=chan_name,
+                    hashtags=target_clip.get("hashtags"),
                     progress_callback=progress_callback
                 )
+                success_count = pub_results.get("success_count", 0)
+                if success_count > 0:
+                    self.config_manager.mark_clip_uploaded(final_mp4, pub_results, profile_name=chan_name)
+                    platforms_list = [p.capitalize() for p in pub_results.get("platforms", [])]
+                    self.logger.info(f"🚀 [Publisher] Clip #{clip_idx + 1} published to {', '.join(platforms_list)}!")
+                    if not pub_results.get("errors"):
+                        self._cleanup_file_safely(final_mp4)
+                        self.config_manager.mark_clip_deleted(final_mp4)
+            except Exception as pub_err:
+                self.logger.warning(f"[Pipeline] Publishing note for clip #{clip_idx + 1}: {pub_err}")
 
-                if captions_on:
-                    raw_words = transcript_data.get("words", []) if transcript_data else []
-                    sliced_words = []
-                    for w in raw_words:
-                        w_start = float(w.get("start", 0))
-                        w_end = float(w.get("end", 0))
-                        if w_end > start_sec and w_start < end_sec:
-                            offset_w = dict(w)
-                            offset_w["start"] = max(0.0, round(w_start - start_sec, 3))
-                            offset_w["end"] = min(round(duration_sec, 3), max(offset_w["start"] + 0.05, round(w_end - start_sec, 3)))
-                            sliced_words.append(offset_w)
-
-                    if sliced_words:
-                        target_clip["aligned_words"] = sliced_words
-                    elif os.path.exists(partial_raw_path):
-                        first_key = key_pool[0] if key_pool else None
-                        accurate_words = transcriber.align_partial_clip_words(partial_raw_path, api_key=first_key, language=lang_code)
-                        target_clip["aligned_words"] = accurate_words or []
-
-                final_render_path = os.path.join(clip_work_dir, f"{video_id}_short_{clip_idx + 1}.mp4")
-                final_mp4 = composer.render_short_clip(
-                    source_video_path=partial_raw_path,
-                    clip_data=target_clip,
-                    output_mp4_path=final_render_path,
-                    enable_captions=captions_on,
-                    enable_face_tracking=face_on,
-                    is_pre_cut=True,
-                    language=active_lang,
-                    caption_color=caption_color,
-                    caption_font=caption_font
-                )
-
-                self._cleanup_file_safely(partial_raw_path)
-
-                target_clip["rendered_mp4_path"] = final_mp4
-                target_clip["created_at"] = time.time()
-                target_clip["video_id"] = video_id
-                target_clip["clip_index"] = clip_idx + 1
-
-                self.config_manager.record_generated_clip(target_clip, profile_name=chan_name)
-
-                # Publishing
-                pub_results = {}
-                try:
-                    multi_pub = MultiPlatformPublisher(self.config_manager, chan_name, logger=self.logger)
-                    pub_results = multi_pub.publish_all(
-                        video_path=final_mp4,
-                        title=clip_title,
-                        hook=target_clip.get("hook", ""),
-                        rationale=target_clip.get("rationale", ""),
+            # Google Sheets logging
+            try:
+                if sheets_enabled and sheets_path and os.path.exists(sheets_path):
+                    from core.sheets_logger import GoogleSheetsLogger
+                    sheets_logger = GoogleSheetsLogger(sheets_path, spreadsheet_id_or_name=sheet_target or "Social Agent Pro Logs", logger=self.logger)
+                    sheets_logger.log_video_upload_async(
                         channel_name=chan_name,
-                        hashtags=target_clip.get("hashtags"),
-                        progress_callback=progress_callback
+                        clip_data=target_clip,
+                        upload_results=pub_results or {},
+                        last_video_time=float(self.config_manager.get_channel_setting("last_autopilot_run", 0, chan_name) or 0),
+                        next_scheduled_time=float(self.config_manager.get_channel_setting("next_autopilot_run", 0, chan_name) or 0)
                     )
-                    success_count = pub_results.get("success_count", 0)
-                    if success_count > 0:
-                        self.config_manager.mark_clip_uploaded(final_mp4, pub_results, profile_name=chan_name)
-                        platforms_list = [p.capitalize() for p in pub_results.get("platforms", [])]
-                        self.logger.info(f"🚀 [Publisher] Clip #{clip_idx + 1} published to {', '.join(platforms_list)}!")
-                        if not pub_results.get("errors"):
-                            self._cleanup_file_safely(final_mp4)
-                            self.config_manager.mark_clip_deleted(final_mp4)
-                except Exception as pub_err:
-                    self.logger.warning(f"[Pipeline] Publishing note for clip #{clip_idx + 1}: {pub_err}")
+            except Exception as sh_err:
+                self.logger.debug(f"[Pipeline] Google sheets logging notice: {sh_err}")
 
-                # Google Sheets logging
-                try:
-                    if sheets_enabled and sheets_path and os.path.exists(sheets_path):
-                        from core.sheets_logger import GoogleSheetsLogger
-                        sheets_logger = GoogleSheetsLogger(sheets_path, spreadsheet_id_or_name=sheet_target or "Social Agent Pro Logs", logger=self.logger)
-                        sheets_logger.log_video_upload_async(
-                            channel_name=chan_name,
-                            clip_data=target_clip,
-                            upload_results=pub_results or {},
-                            last_video_time=float(self.config_manager.get_channel_setting("last_autopilot_run", 0, chan_name) or 0),
-                            next_scheduled_time=float(self.config_manager.get_channel_setting("next_autopilot_run", 0, chan_name) or 0)
-                        )
-                except Exception as sh_err:
-                    self.logger.debug(f"[Pipeline] Google sheets logging notice: {sh_err}")
+            completed_clips.append(target_clip)
+            new_completed = clip_idx + 1
+            self.logger.info(f"✅ [Short {new_completed}/{active_target}] Successfully created & processed: '{clip_title}'")
 
-                completed_clips.append(target_clip)
-                self.logger.info(f"✅ [Short {clip_idx + 1}/{len(planned_clips)}] Successfully created: '{clip_title}'")
+            # Cleanup temp captions & junk files
+            self._cleanup_temp_captions_dir(video_id)
+            self._cleanup_junk_temp_files()
 
-            except Exception as clip_err:
-                self.logger.error(f"[Pipeline] Failed processing clip #{clip_idx + 1}: {clip_err}")
-                self._cleanup_file_safely(partial_raw_path)
+            if new_completed >= active_target:
+                self.state_tracker.mark_processed(video_id, title=video_title, metadata={"clips_generated": new_completed})
+                self.config_manager.add_processed_video(video_id, profile_name=chan_name)
+                self.config_manager.clear_active_video_state(chan_name)
 
-        # Cleanup temp captions & junk files
-        self._cleanup_temp_captions_dir(video_id)
-        self._cleanup_junk_temp_files()
+                if os.path.exists(planned_clips_file):
+                    try:
+                        os.remove(planned_clips_file)
+                    except Exception:
+                        pass
 
-        # Mark entire video processed once all clips are completed
-        if completed_clips:
-            self.state_tracker.mark_processed(video_id, title=video_title, metadata={"clips_generated": len(completed_clips)})
-            self.config_manager.add_processed_video(video_id)
-
-            # Advance Round-Robin rotation index to the NEXT channel
-            if locked_channel_idx is not None and target_channels:
-                next_ch_idx = (locked_channel_idx + 1) % len(target_channels)
-                self.config_manager.set_channel_setting("last_target_channel_index", next_ch_idx, chan_name)
+                # Advance Round-Robin rotation index to the NEXT channel
+                if locked_channel_idx is not None and target_channels:
+                    next_ch_idx = (locked_channel_idx + 1) % len(target_channels)
+                    self.config_manager.set_channel_setting("last_target_channel_index", next_ch_idx, chan_name)
+                    self.config_manager.save_config()
+                    next_chan_url = target_channels[next_ch_idx]
+                    self.logger.info(
+                        f"🔄 [Channel Rotation] All {active_target} shorts completed from Channel #{locked_channel_idx + 1}! "
+                        f"Advancing to Channel #{next_ch_idx + 1}/{len(target_channels)}: '{next_chan_url}' for next scheduled run."
+                    )
+                else:
+                    self.logger.info(f"🎉 [Pipeline] All {active_target} shorts completed for '{video_title}'!")
+            else:
+                self.config_manager.set_channel_setting("active_video_state", {
+                    "video_id": video_id,
+                    "video_title": video_title,
+                    "target_url": target_url,
+                    "channel_idx": locked_channel_idx,
+                    "target_clip_count": active_target,
+                    "completed_clip_count": new_completed,
+                    "status": "in_progress"
+                }, chan_name)
                 self.config_manager.save_config()
-                next_chan_url = target_channels[next_ch_idx]
                 self.logger.info(
-                    f"🔄 [Channel Rotation] Video completed from Channel #{locked_channel_idx + 1}! "
-                    f"Advancing to Channel #{next_ch_idx + 1}/{len(target_channels)}: '{next_chan_url}' for next run."
+                    f"⏳ [Smart Resume] Video '{video_title}' progress: {new_completed}/{active_target} shorts completed. "
+                    f"Next short (Clip #{new_completed + 1}) will generate on next Autopilot interval."
                 )
+
+        except Exception as clip_err:
+            self.logger.error(f"[Pipeline] Failed processing clip #{clip_idx + 1}: {clip_err}")
+            self._cleanup_file_safely(partial_raw_path)
 
         self.logger.info(f"🎉 [Pipeline] Complete: Successfully generated {len(completed_clips)} Shorts for '{chan_name}'!")
         return completed_clips

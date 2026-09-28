@@ -982,7 +982,7 @@ class ConfigManager:
 
     def clear_active_video_state(self, profile_name: Optional[str] = None):
         """Clears active video lock when all clips are finished and cleaned up."""
-        target = self.get_channel_setting("target_clips_per_video", 3, profile_name) if profile_name else self.get("target_clips_per_video", 3)
+        target = self.get_channel_setting("target_clips_per_video", 5, profile_name) if profile_name else self.get("target_clips_per_video", 5)
         st = {
             "video_id": "",
             "target_clip_count": target,
