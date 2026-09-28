@@ -270,21 +270,33 @@ class ShortsAutomationPipeline:
             content_type = ctx.get("content_type", "podcast")
 
             channel_candidate_pool = []
+            locked_channel_idx: Optional[int] = None
 
             # =========================================================================
-            # TIER 1: TARGETED CHANNELS DISCOVERY
+            # TIER 1: TARGETED CHANNELS DISCOVERY (ROUND-ROBIN ROTATION)
             # =========================================================================
             if discovery_mode in ("channels_only", "hybrid") and target_channels:
+                # Rotate through channels starting from last_target_channel_index
+                last_ch_idx = int(self.config_manager.get_channel_setting("last_target_channel_index", 0, chan_name) or 0)
+                if last_ch_idx >= len(target_channels):
+                    last_ch_idx = 0
+
+                ordered_channels = [
+                    ((last_ch_idx + i) % len(target_channels), target_channels[(last_ch_idx + i) % len(target_channels)])
+                    for i in range(len(target_channels))
+                ]
+
                 self.logger.info(
-                    f"🎯 [Discovery - Tier 1] Checking {len(target_channels)} target channel(s) for '{chan_name}' (Mode: {discovery_mode})..."
+                    f"🎯 [Discovery - Tier 1] Checking {len(target_channels)} target channel(s) for '{chan_name}' "
+                    f"(Starting with Channel #{last_ch_idx + 1}, Mode: {discovery_mode})..."
                 )
 
-                for ch_idx, target_channel in enumerate(target_channels):
+                for ch_pos, (ch_idx, target_channel) in enumerate(ordered_channels):
                     if stop_checker and stop_checker():
                         self.logger.warning("Pipeline halted by user.")
                         return []
 
-                    self.logger.info(f"🔍 [Tier 1] [{ch_idx + 1}/{len(target_channels)}] Fetching recent videos from: {target_channel}...")
+                    self.logger.info(f"🔍 [Tier 1] [{ch_pos + 1}/{len(ordered_channels)}] Checking Channel #{ch_idx + 1}: {target_channel}...")
                     try:
                         cands = ingestion.fetch_channel_recent_videos(target_channel, limit=25)
                     except Exception as e:
@@ -366,12 +378,12 @@ class ShortsAutomationPipeline:
                             self.state_tracker.mark_failed(cand_id, reason="skipped_off_topic")
                             continue
 
-                        # Candidate validated successfully!
                         video_id = cand_id
                         target_url = cand_url
                         video_title = cand_title
                         transcript_data = t_data
-                        self.logger.info(f"📺 [Tier 1] Locked onto target channel video: '{video_title}' ({video_id})")
+                        locked_channel_idx = ch_idx
+                        self.logger.info(f"📺 [Tier 1] Locked onto target channel video: '{video_title}' ({video_id}) from Channel #{ch_idx + 1}")
                         break
 
                     if video_id and transcript_data:
@@ -586,11 +598,15 @@ class ShortsAutomationPipeline:
         if not key_pool:
             raise ValueError("No Groq API Keys configured! Please add a key in Admin Settings.")
 
-        self.logger.debug(f"[Pipeline] Querying Groq LLM Brain for '{video_id}'...")
+        # Determine clip count per video (defaults to 5, clamp 1-8)
+        target_clip_count = int(clip_count or self.config_manager.get_channel_setting("target_clips_per_video", 5, chan_name) or 5)
+        target_clip_count = max(1, min(8, target_clip_count))
+
+        self.logger.info(f"🧠 [Brain] Querying Groq AI to extract top {target_clip_count} viral clips for '{video_id}'...")
         clip_extractor = ViralClipExtractor(api_keys=key_pool, logger=self.logger)
         planned_clips = clip_extractor.extract_viral_clips(
             transcript_data=transcript_data,
-            clip_count=1,
+            clip_count=target_clip_count,
             topic_focus=topic,
             min_duration=min_dur,
             max_duration=max_dur,
@@ -598,77 +614,22 @@ class ShortsAutomationPipeline:
         )
 
         if not planned_clips:
-            self.logger.error("[Pipeline] Groq LLM could not find a compliant 50-58s clip in this transcript.")
+            self.logger.error("[Pipeline] Groq LLM could not find compliant 50-58s clips in this transcript.")
             self.state_tracker.mark_failed(video_id, reason="failed_no_viral_clips")
             return []
 
-        target_clip = planned_clips[0]
-        start_sec = float(target_clip["start_time"])
-        end_sec = float(target_clip["end_time"])
-        duration_sec = float(target_clip["duration"])
-        clip_title = target_clip.get("title", "Viral Short")
-
-        # --- PHASE 5: Partial Video Download (Only 58 Seconds!) ---
-        if stop_checker and stop_checker():
-            self.logger.warning("Pipeline halted by user.")
-            return []
+        self.logger.info(f"🎬 [Pipeline] Generating {len(planned_clips)} shorts from '{video_title}'...")
 
         yt_res_str = self.config_manager.get_channel_setting("youtube_download_resolution", "1080p", chan_name)
         yt_height = int(yt_res_str.replace("p", ""))
 
         clip_work_dir = os.path.join(shorts_dir, video_id)
         os.makedirs(clip_work_dir, exist_ok=True)
-        partial_raw_path = os.path.join(clip_work_dir, f"{video_id}_partial_raw.mp4")
-
-        self.logger.info(f"⬇️ [Ingestion] Downloading {duration_sec:.1f}s video segment...")
-        ingestion.download_partial_video(
-            url=target_url,
-            start_sec=start_sec,
-            end_sec=end_sec,
-            output_path=partial_raw_path,
-            target_height=yt_height,
-            progress_callback=progress_callback
-        )
-
-        # --- PHASE 5.5: Precise Word-Level Subtitle Alignment (<3s) ---
-        captions_on = self.config_manager.get_channel_setting("enable_captions", True, chan_name)
-        if captions_on:
-            raw_words = transcript_data.get("words", []) if transcript_data else []
-            # Sync transcript data to clip's start time: filter words within [start_sec, end_sec]
-            # and subtract start_sec so the new clip captions start at 0.0 relative to the cut clip duration
-            sliced_words = []
-            for w in raw_words:
-                w_start = float(w.get("start", 0))
-                w_end = float(w.get("end", 0))
-                if w_end > start_sec and w_start < end_sec:
-                    offset_w = dict(w)
-                    offset_w["start"] = max(0.0, round(w_start - start_sec, 3))
-                    offset_w["end"] = min(round(duration_sec, 3), max(offset_w["start"] + 0.05, round(w_end - start_sec, 3)))
-                    sliced_words.append(offset_w)
-
-            if sliced_words:
-                target_clip["aligned_words"] = sliced_words
-                self.logger.debug(f"[Pipeline] Sliced {len(sliced_words)} words synced to [0.0s - {duration_sec:.1f}s].")
-            elif os.path.exists(partial_raw_path):
-                # Fallback: align partial clip directly with Groq Whisper Large-V3 API (not local CPU tiny)
-                self.logger.debug(f"[Pipeline] Slicing empty; aligning with Groq Whisper Large-V3 API (language='{lang_code}')...")
-                first_key = key_pool[0] if key_pool else None
-                accurate_words = transcriber.align_partial_clip_words(partial_raw_path, api_key=first_key, language=lang_code)
-                target_clip["aligned_words"] = accurate_words or []
-
-        # --- PHASE 6: 9:16 Template & Subtitle Compositing ---
-        if stop_checker and stop_checker():
-            self.logger.warning("Pipeline halted by user.")
-            self._cleanup_file_safely(partial_raw_path)
-            return []
 
         out_w, out_h = self.config_manager.get_resolution_dimensions()
-        
-        # Retrieve dynamic template path from active channel context dictionary
         raw_tpl_path = self.config_manager.get_template_path(chan_name)
         resolved_tpl_path = self.config_manager.resolve_asset_path(raw_tpl_path)
 
-        # Fallback / Safety Check: Wrap template loader with an os.path.exists() check
         final_tpl_path = None
         if resolved_tpl_path and os.path.exists(resolved_tpl_path):
             final_tpl_path = resolved_tpl_path
@@ -676,16 +637,8 @@ class ShortsAutomationPipeline:
         else:
             default_fallback = self.config_manager.resolve_asset_path("assets/wealth secret template (2).jpg")
             if default_fallback and os.path.exists(default_fallback):
-                self.logger.warning(
-                    f"[Live Activity Log] ⚠️ Template Warning: Dynamic template '{raw_tpl_path}' for channel '{chan_name}' "
-                    f"not found on disk. Falling back to default asset: {default_fallback}"
-                )
                 final_tpl_path = default_fallback
             else:
-                self.logger.warning(
-                    f"[Live Activity Log] ⚠️ Template Warning: Dynamic template '{raw_tpl_path}' for channel '{chan_name}' "
-                    f"not found on disk. Proceeding with compositing without template overlay."
-                )
                 final_tpl_path = None
 
         composer = FFmpegComposer(
@@ -698,117 +651,159 @@ class ShortsAutomationPipeline:
             logger=self.logger
         )
 
-        final_render_path = os.path.join(clip_work_dir, f"{video_id}_short.mp4")
         face_on = self.config_manager.get_channel_setting("enable_face_tracking", True, chan_name)
         caption_color = self.config_manager.get_caption_color(chan_name)
         caption_font = self.config_manager.get_caption_font(chan_name)
+        captions_on = self.config_manager.get_channel_setting("enable_captions", True, chan_name)
 
-        final_mp4 = composer.render_short_clip(
-            source_video_path=partial_raw_path,
-            clip_data=target_clip,
-            output_mp4_path=final_render_path,
-            enable_captions=captions_on,
-            enable_face_tracking=face_on,
-            is_pre_cut=True,
-            language=active_lang,
-            caption_color=caption_color,
-            caption_font=caption_font
-        )
+        sheets_path = (
+            self.config_manager.get_channel_setting("google_sheets_json_path", "", chan_name) or
+            self.config_manager.get("google_sheets_json_path", "")
+        ).strip()
+        sheet_target = (
+            self.config_manager.get_channel_setting("google_spreadsheet_id", "", chan_name) or
+            self.config_manager.get("google_spreadsheet_id", "")
+        ).strip()
+        sheets_enabled = self.config_manager.get_channel_setting("enable_google_sheets_logging", True, chan_name)
 
-        # Instant auto-cleanup: delete raw 58s partial download
-        self._cleanup_file_safely(partial_raw_path)
+        completed_clips = []
 
-        target_clip["rendered_mp4_path"] = final_mp4
-        target_clip["created_at"] = time.time()
-        target_clip["video_id"] = video_id
-        target_clip["clip_index"] = 1
+        for clip_idx, target_clip in enumerate(planned_clips):
+            if stop_checker and stop_checker():
+                self.logger.warning("Pipeline halted by user.")
+                break
 
-        # Record to Persistent State Tracker and Config
-        self.state_tracker.mark_processed(video_id, title=video_title, metadata={"short_title": clip_title, "duration": duration_sec})
-        self.config_manager.add_processed_video(video_id)
-        self.config_manager.record_generated_clip(target_clip, profile_name=chan_name)
+            start_sec = float(target_clip["start_time"])
+            end_sec = float(target_clip["end_time"])
+            duration_sec = float(target_clip["duration"])
+            clip_title = target_clip.get("title", f"Short #{clip_idx + 1}")
 
-        # Multi-Platform Publishing (YouTube, Facebook Reels, Instagram Reels)
-        upload_successful = False
-        try:
-            multi_pub = MultiPlatformPublisher(self.config_manager, chan_name, logger=self.logger)
-            pub_results = multi_pub.publish_all(
-                video_path=final_mp4,
-                title=clip_title,
-                hook=target_clip.get("hook", ""),
-                rationale=target_clip.get("rationale", ""),
-                channel_name=chan_name,
-                hashtags=target_clip.get("hashtags"),
-                progress_callback=progress_callback
-            )
-            success_count = pub_results.get("success_count", 0)
-            if success_count > 0:
-                self.config_manager.mark_clip_uploaded(final_mp4, pub_results, profile_name=chan_name)
-                platforms_list = [p.capitalize() for p in pub_results.get("platforms", [])]
-                platforms_str = ", ".join(platforms_list)
-                self.logger.info(f"🚀 [Publisher] Successfully published to {platforms_str}!")
-                upload_successful = True
-
-                # ── Auto-Delete After Confirmed Upload ──────────────────
-                if not pub_results.get("errors"):
-                    self.logger.info(
-                        f"🧹 [Auto-Cleanup] Upload confirmed to {platforms_str}. Removed local copy."
-                    )
-                    self._cleanup_file_safely(final_mp4)
-                    self.config_manager.mark_clip_deleted(final_mp4)
-                    final_mp4 = ""  # Clear path to signal file is gone
-                else:
-                    self.logger.warning(
-                        f"[Auto-Cleanup] Partial platform upload errors: {pub_results['errors']}. Local file preserved."
-                    )
-            else:
-                if pub_results.get("errors"):
-                    self.logger.warning(
-                        f"[Pipeline] Upload failed with errors: {pub_results['errors']}. Local file preserved at: {final_mp4}"
-                    )
-                else:
-                    self.logger.info(f"[Pipeline] No social platforms enabled. Video saved locally: {final_mp4}")
-        except Exception as e:
-            self.logger.warning(
-                f"[Pipeline] Multi-platform publishing note: {e}. Local file preserved at: {final_mp4}"
+            self.logger.info(
+                f"✂️ [Clip {clip_idx + 1}/{len(planned_clips)}] '{clip_title}' "
+                f"({duration_sec:.1f}s: {start_sec:.1f}s - {end_sec:.1f}s)..."
             )
 
-        # ── Temp Captions Cleanup ─────────────────────────────────────────────
-        # After render completes (whether uploaded or not), clean up temp PNG folder
+            partial_raw_path = os.path.join(clip_work_dir, f"{video_id}_clip_{clip_idx + 1}_raw.mp4")
+
+            try:
+                ingestion.download_partial_video(
+                    url=target_url,
+                    start_sec=start_sec,
+                    end_sec=end_sec,
+                    output_path=partial_raw_path,
+                    target_height=yt_height,
+                    progress_callback=progress_callback
+                )
+
+                if captions_on:
+                    raw_words = transcript_data.get("words", []) if transcript_data else []
+                    sliced_words = []
+                    for w in raw_words:
+                        w_start = float(w.get("start", 0))
+                        w_end = float(w.get("end", 0))
+                        if w_end > start_sec and w_start < end_sec:
+                            offset_w = dict(w)
+                            offset_w["start"] = max(0.0, round(w_start - start_sec, 3))
+                            offset_w["end"] = min(round(duration_sec, 3), max(offset_w["start"] + 0.05, round(w_end - start_sec, 3)))
+                            sliced_words.append(offset_w)
+
+                    if sliced_words:
+                        target_clip["aligned_words"] = sliced_words
+                    elif os.path.exists(partial_raw_path):
+                        first_key = key_pool[0] if key_pool else None
+                        accurate_words = transcriber.align_partial_clip_words(partial_raw_path, api_key=first_key, language=lang_code)
+                        target_clip["aligned_words"] = accurate_words or []
+
+                final_render_path = os.path.join(clip_work_dir, f"{video_id}_short_{clip_idx + 1}.mp4")
+                final_mp4 = composer.render_short_clip(
+                    source_video_path=partial_raw_path,
+                    clip_data=target_clip,
+                    output_mp4_path=final_render_path,
+                    enable_captions=captions_on,
+                    enable_face_tracking=face_on,
+                    is_pre_cut=True,
+                    language=active_lang,
+                    caption_color=caption_color,
+                    caption_font=caption_font
+                )
+
+                self._cleanup_file_safely(partial_raw_path)
+
+                target_clip["rendered_mp4_path"] = final_mp4
+                target_clip["created_at"] = time.time()
+                target_clip["video_id"] = video_id
+                target_clip["clip_index"] = clip_idx + 1
+
+                self.config_manager.record_generated_clip(target_clip, profile_name=chan_name)
+
+                # Publishing
+                pub_results = {}
+                try:
+                    multi_pub = MultiPlatformPublisher(self.config_manager, chan_name, logger=self.logger)
+                    pub_results = multi_pub.publish_all(
+                        video_path=final_mp4,
+                        title=clip_title,
+                        hook=target_clip.get("hook", ""),
+                        rationale=target_clip.get("rationale", ""),
+                        channel_name=chan_name,
+                        hashtags=target_clip.get("hashtags"),
+                        progress_callback=progress_callback
+                    )
+                    success_count = pub_results.get("success_count", 0)
+                    if success_count > 0:
+                        self.config_manager.mark_clip_uploaded(final_mp4, pub_results, profile_name=chan_name)
+                        platforms_list = [p.capitalize() for p in pub_results.get("platforms", [])]
+                        self.logger.info(f"🚀 [Publisher] Clip #{clip_idx + 1} published to {', '.join(platforms_list)}!")
+                        if not pub_results.get("errors"):
+                            self._cleanup_file_safely(final_mp4)
+                            self.config_manager.mark_clip_deleted(final_mp4)
+                except Exception as pub_err:
+                    self.logger.warning(f"[Pipeline] Publishing note for clip #{clip_idx + 1}: {pub_err}")
+
+                # Google Sheets logging
+                try:
+                    if sheets_enabled and sheets_path and os.path.exists(sheets_path):
+                        from core.sheets_logger import GoogleSheetsLogger
+                        sheets_logger = GoogleSheetsLogger(sheets_path, spreadsheet_id_or_name=sheet_target or "Social Agent Pro Logs", logger=self.logger)
+                        sheets_logger.log_video_upload_async(
+                            channel_name=chan_name,
+                            clip_data=target_clip,
+                            upload_results=pub_results or {},
+                            last_video_time=float(self.config_manager.get_channel_setting("last_autopilot_run", 0, chan_name) or 0),
+                            next_scheduled_time=float(self.config_manager.get_channel_setting("next_autopilot_run", 0, chan_name) or 0)
+                        )
+                except Exception as sh_err:
+                    self.logger.debug(f"[Pipeline] Google sheets logging notice: {sh_err}")
+
+                completed_clips.append(target_clip)
+                self.logger.info(f"✅ [Short {clip_idx + 1}/{len(planned_clips)}] Successfully created: '{clip_title}'")
+
+            except Exception as clip_err:
+                self.logger.error(f"[Pipeline] Failed processing clip #{clip_idx + 1}: {clip_err}")
+                self._cleanup_file_safely(partial_raw_path)
+
+        # Cleanup temp captions & junk files
         self._cleanup_temp_captions_dir(video_id)
-
-        # ── Junk File Cleanup (orphaned MoviePy temp files in project root) ───
         self._cleanup_junk_temp_files()
 
-        # ── Google Sheets Multi-Channel Logging ───────────────────────────────
-        try:
-            sheets_path = (
-                self.config_manager.get_channel_setting("google_sheets_json_path", "", chan_name) or
-                self.config_manager.get("google_sheets_json_path", "")
-            ).strip()
-            sheet_target = (
-                self.config_manager.get_channel_setting("google_spreadsheet_id", "", chan_name) or
-                self.config_manager.get("google_spreadsheet_id", "")
-            ).strip()
-            sheets_enabled = self.config_manager.get_channel_setting("enable_google_sheets_logging", True, chan_name)
+        # Mark entire video processed once all clips are completed
+        if completed_clips:
+            self.state_tracker.mark_processed(video_id, title=video_title, metadata={"clips_generated": len(completed_clips)})
+            self.config_manager.add_processed_video(video_id)
 
-            if sheets_enabled and sheets_path and os.path.exists(sheets_path):
-                from core.sheets_logger import GoogleSheetsLogger
-                last_time = float(self.config_manager.get_channel_setting("last_autopilot_run", 0, chan_name) or 0)
-                next_time = float(self.config_manager.get_channel_setting("next_autopilot_run", 0, chan_name) or 0)
-                sheets_logger = GoogleSheetsLogger(sheets_path, spreadsheet_id_or_name=sheet_target or "Social Agent Pro Logs", logger=self.logger)
-                sheets_logger.log_video_upload_async(
-                    channel_name=chan_name,
-                    clip_data=target_clip,
-                    upload_results=pub_results if 'pub_results' in locals() and pub_results else {},
-                    last_video_time=last_time,
-                    next_scheduled_time=next_time
+            # Advance Round-Robin rotation index to the NEXT channel
+            if locked_channel_idx is not None and target_channels:
+                next_ch_idx = (locked_channel_idx + 1) % len(target_channels)
+                self.config_manager.set_channel_setting("last_target_channel_index", next_ch_idx, chan_name)
+                self.config_manager.save_config()
+                next_chan_url = target_channels[next_ch_idx]
+                self.logger.info(
+                    f"🔄 [Channel Rotation] Video completed from Channel #{locked_channel_idx + 1}! "
+                    f"Advancing to Channel #{next_ch_idx + 1}/{len(target_channels)}: '{next_chan_url}' for next run."
                 )
-        except Exception as sheet_err:
-            self.logger.warning(f"[Pipeline] Google Sheets logging notice: {sheet_err}")
 
-        self.logger.info(f"🎉 [Pipeline] 1-Short Cycle Complete for '{chan_name}'!")
-        return [target_clip]
+        self.logger.info(f"🎉 [Pipeline] Complete: Successfully generated {len(completed_clips)} Shorts for '{chan_name}'!")
+        return completed_clips
 
     def _cleanup_temp_captions_dir(self, video_id: str = "") -> None:
         """Deletes the temp_captions output directory after PNGs have been composited."""

@@ -47,6 +47,7 @@ class ConfigManager:
         "target_channels",
         "target_channel_url",
         "discovery_mode",
+        "last_target_channel_index",
         "auto_pilot",
         "autopilot_interval_hours",
         "last_autopilot_run",
@@ -534,10 +535,11 @@ class ConfigManager:
             "auto_pilot": False,
             "autopilot_interval_hours": 2,
             "last_autopilot_run": 0,
-            "target_clips_per_video": 3,
+            "target_clips_per_video": 5,
+            "last_target_channel_index": 0,
             "active_video_state": {
                 "video_id": "",
-                "target_clip_count": 3,
+                "target_clip_count": 5,
                 "completed_clip_count": 0,
                 "status": "idle"
             },

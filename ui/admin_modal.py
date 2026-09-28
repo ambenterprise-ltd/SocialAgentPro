@@ -925,10 +925,10 @@ class AdminSettingsModal(ctk.CTkToplevel):
 
         self.clips_per_vid_dropdown = ctk.CTkOptionMenu(
             clips_row,
-            values=["3", "4", "5"],
+            values=["1", "3", "4", "5", "6"],
             width=100
         )
-        self.clips_per_vid_dropdown.set("3")
+        self.clips_per_vid_dropdown.set("5")
         self.clips_per_vid_dropdown.pack(side="left")
 
         self.reuse_var = ctk.BooleanVar(value=True)
@@ -1168,7 +1168,7 @@ class AdminSettingsModal(ctk.CTkToplevel):
         face_on = self.config_manager.get_channel_setting("enable_face_tracking", True, profile_name)
         self.face_tracker_var.set(face_on)
 
-        target_clips = self.config_manager.get_channel_setting("target_clips_per_video", 3, profile_name)
+        target_clips = self.config_manager.get_channel_setting("target_clips_per_video", 5, profile_name)
         self.clips_per_vid_dropdown.set(str(target_clips))
 
         autopilot_on = self.config_manager.get_channel_setting("auto_pilot", False, profile_name)
