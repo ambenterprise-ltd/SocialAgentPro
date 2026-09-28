@@ -401,12 +401,13 @@ class ShortsAutomationPipeline:
                             self.state_tracker.mark_failed(cand_id, reason="skipped_negative_filter")
                             continue
 
-                        self.logger.debug(f"[Tier 1] Checking transcript for '{cand_title}' ({cand_id})...")
+                        self.logger.info(f"🔍 [Tier 1] Checking transcript for '{cand_title}' ({cand_id})...")
                         cache_suffix = f"_{lang_code}" if lang_code != "en" else ""
                         cache_json = os.path.join(transcripts_dir, f"{cand_id}{cache_suffix}_transcript.json")
                         t_data = transcriber.fetch_headless_transcript(cand_id, cache_json_path=cache_json, language=lang_code)
 
                         if not t_data or not t_data.get("words"):
+                            self.logger.info(f"⏭️ [Tier 1] No subtitles for '{cand_title}' ({cand_id}). Checking next candidate...")
                             self.state_tracker.mark_failed(cand_id, reason="failed_no_transcript")
                             continue
 
@@ -434,10 +435,10 @@ class ShortsAutomationPipeline:
                     if video_id and transcript_data:
                         break
 
-            # Handle channels_only exhaustion / fallback
-            if discovery_mode == "channels_only" and (not video_id or not transcript_data):
+            # Handle target channel exhaustion / Whisper audio fallback (both channels_only and hybrid)
+            if not video_id or not transcript_data:
                 if channel_candidate_pool:
-                    self.logger.info("⚡ [Tier 1] Trying Whisper audio fallback for top target channel candidate...")
+                    self.logger.info("⚡ [Tier 1] Headless transcripts unavailable on target channel. Trying Whisper audio fallback for top candidate...")
                     top_cand = channel_candidate_pool[0]
                     cand_id = top_cand.get("id")
                     cand_url = top_cand.get("url") or f"https://www.youtube.com/watch?v={cand_id}"
@@ -457,7 +458,7 @@ class ShortsAutomationPipeline:
                     except Exception as we:
                         self.logger.warning(f"[Tier 1] Whisper fallback failed: {we}")
 
-                if not video_id or not transcript_data:
+                if discovery_mode == "channels_only" and (not video_id or not transcript_data):
                     raise ValueError(
                         f"All videos from configured target channel(s) ({len(target_channels)}) have been processed or lack transcripts. "
                         f"Discovery Mode is set to 'Targeted Channels Only'. "
@@ -567,12 +568,13 @@ class ShortsAutomationPipeline:
                             self.state_tracker.mark_failed(cand_id, reason="skipped_negative_filter")
                             continue
 
-                        self.logger.debug(f"[Tier 2] Checking transcript for '{cand_title}' ({cand_id})...")
+                        self.logger.info(f"🔍 [Tier 2] Checking transcript for '{cand_title}' ({cand_id})...")
                         cache_suffix = f"_{lang_code}" if lang_code != "en" else ""
                         cache_json = os.path.join(transcripts_dir, f"{cand_id}{cache_suffix}_transcript.json")
                         t_data = transcriber.fetch_headless_transcript(cand_id, cache_json_path=cache_json, language=lang_code)
 
                         if not t_data or not t_data.get("words"):
+                            self.logger.info(f"⏭️ [Tier 2] No subtitles for '{cand_title}' ({cand_id}). Checking next candidate...")
                             self.state_tracker.mark_failed(cand_id, reason="failed_no_transcript")
                             continue
 

@@ -60,6 +60,42 @@ class WhisperTranscriber:
         self.device = device
         self.compute_type = compute_type
         self.cpu_threads = cpu_threads
+        self.cookies_path = self._locate_cookies_file()
+
+    def _locate_cookies_file(self) -> Optional[str]:
+        """Locates cookies.txt in workspace root or runtime paths."""
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        for cand in [
+            os.path.join(base_dir, "cookies.txt"),
+            os.path.join(os.getcwd(), "cookies.txt"),
+            "cookies.txt"
+        ]:
+            if os.path.exists(cand) and os.path.getsize(cand) > 50:
+                return os.path.abspath(cand)
+        return None
+
+    def _create_http_client(self):
+        """Creates an authenticated requests.Session loaded with Netscape cookies for cloud/EC2 IP bypass."""
+        try:
+            import requests
+            import http.cookiejar
+            session = requests.Session()
+            session.headers.update({
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+                "Accept-Language": "en-US,en;q=0.9",
+            })
+            if self.cookies_path and os.path.exists(self.cookies_path):
+                cj = http.cookiejar.MozillaCookieJar(self.cookies_path)
+                try:
+                    cj.load(ignore_discard=True, ignore_expires=True)
+                    session.cookies = cj
+                    self.logger.debug(f"[FastTranscriber] Attached cookies from: {self.cookies_path}")
+                except Exception as e_cook:
+                    self.logger.debug(f"[FastTranscriber] Note parsing cookies: {e_cook}")
+            return session
+        except Exception as e:
+            self.logger.debug(f"[FastTranscriber] Could not create HTTP session: {e}")
+            return None
 
     def _interpolate_words(self, text: str, start: float, end: float) -> List[Dict[str, Any]]:
         """Splits a text segment into uniformly interpolated words for ASS subtitles."""
@@ -85,122 +121,120 @@ class WhisperTranscriber:
         Fetches and interpolates native youtube transcript in target language.
         Strictly generates captions in the native spoken language of the video without auto-translation.
         Checks both manually created and auto-generated transcripts with dialect support.
+        Cascades seamlessly to yt-dlp signed timedtext fallback on cloud/datacenter IP restrictions.
         """
-        try:
-            lang_code = resolve_language_code(target_language)
-            self.logger.debug(f"[FastTranscriber] Fetching transcript for '{video_id}' (lang='{target_language}')...")
-            raw_transcript = None
-            detected_lang = lang_code
+        lang_code = resolve_language_code(target_language)
+        self.logger.debug(f"[FastTranscriber] Fetching transcript for '{video_id}' (lang='{target_language}')...")
+        raw_transcript = None
+        detected_lang = lang_code
 
-            # Regional dialect codes for target language
-            dialect_map = {
-                "en": ['en', 'en-US', 'en-GB', 'en-CA', 'en-AU', 'en-IN', 'en-NZ', 'en-IE', 'en-ZA'],
-                "es": ['es', 'es-ES', 'es-419', 'es-MX', 'es-US'],
-                "ur": ['ur', 'ur-PK'],
-                "ar": ['ar', 'ar-SA', 'ar-EG', 'ar-AE'],
-                "hi": ['hi', 'hi-IN'],
-                "fr": ['fr', 'fr-FR', 'fr-CA'],
-                "de": ['de', 'de-DE'],
-                "zh": ['zh', 'zh-Hans', 'zh-Hant', 'zh-CN', 'zh-TW'],
-                "ja": ['ja', 'ja-JP'],
-                "pt": ['pt', 'pt-BR', 'pt-PT'],
-                "ru": ['ru', 'ru-RU']
-            }
-            target_codes = dialect_map.get(lang_code, [lang_code])
+        # Regional dialect codes for target language
+        dialect_map = {
+            "en": ['en', 'en-US', 'en-GB', 'en-CA', 'en-AU', 'en-IN', 'en-NZ', 'en-IE', 'en-ZA'],
+            "es": ['es', 'es-ES', 'es-419', 'es-MX', 'es-US'],
+            "ur": ['ur', 'ur-PK'],
+            "ar": ['ar', 'ar-SA', 'ar-EG', 'ar-AE'],
+            "hi": ['hi', 'hi-IN'],
+            "fr": ['fr', 'fr-FR', 'fr-CA'],
+            "de": ['de', 'de-DE'],
+            "zh": ['zh', 'zh-Hans', 'zh-Hant', 'zh-CN', 'zh-TW'],
+            "ja": ['ja', 'ja-JP'],
+            "pt": ['pt', 'pt-BR', 'pt-PT'],
+            "ru": ['ru', 'ru-RU']
+        }
+        target_codes = dialect_map.get(lang_code, [lang_code])
+
+        try:
+            http_client = self._create_http_client()
+            ytt = YouTubeTranscriptApi(http_client=http_client) if http_client else YouTubeTranscriptApi()
+            try:
+                t_list = ytt.list(video_id)
+            except TranscriptsDisabled:
+                self.logger.debug(f"[FastTranscriber] Transcripts disabled for video '{video_id}'. Trying yt-dlp fallback...")
+                return self._fetch_ytdlp_native(video_id, target_language)
+            except VideoUnavailable:
+                self.logger.debug(f"[FastTranscriber] Video '{video_id}' is unavailable or private.")
+                return None
+            except NoTranscriptFound:
+                self.logger.debug(f"[FastTranscriber] No transcripts found on YouTube for '{video_id}'. Trying yt-dlp fallback...")
+                return self._fetch_ytdlp_native(video_id, target_language)
+            except Exception as e_list:
+                self.logger.info(f"[FastTranscriber] YouTube API transcript note for '{video_id}': {e_list}. Trying signed yt-dlp fallback...")
+                return self._fetch_ytdlp_native(video_id, target_language)
+
+            t_obj = None
+            # 1. Try finding transcript matching target dialects
+            try:
+                t_obj = t_list.find_transcript(target_codes)
+            except NoTranscriptFound:
+                pass
+            except Exception as e_find:
+                self.logger.debug(f"[FastTranscriber] find_transcript failed with: {e_find}")
+
+            # 2. If not found, inspect all available transcripts for dialect prefix match (e.g. en-*)
+            if not t_obj:
+                for t in t_list:
+                    if t.language_code.lower().startswith(lang_code.lower()):
+                        t_obj = t
+                        break
+
+            if not t_obj:
+                avail_langs = [t.language_code for t in t_list]
+                self.logger.debug(f"[FastTranscriber] No native transcript found in {target_codes} for '{video_id}'. (Available: {avail_langs}). Trying yt-dlp fallback...")
+                return self._fetch_ytdlp_native(video_id, target_language)
 
             try:
-                ytt = YouTubeTranscriptApi()
-                try:
-                    t_list = ytt.list(video_id)
-                except TranscriptsDisabled:
-                    self.logger.debug(f"[FastTranscriber] Transcripts disabled for video '{video_id}'.")
-                    return None
-                except VideoUnavailable:
-                    self.logger.debug(f"[FastTranscriber] Video '{video_id}' is unavailable or private.")
-                    return None
-                except NoTranscriptFound:
-                    self.logger.debug(f"[FastTranscriber] No transcripts found on YouTube for '{video_id}'.")
-                    return None
-                except Exception as e_list:
-                    self.logger.debug(f"[FastTranscriber] Transcript listing error for '{video_id}': {e_list}")
-                    return None
-
-                t_obj = None
-                # 1. Try finding transcript matching target dialects (find_transcript checks manual first, then generated)
-                try:
-                    t_obj = t_list.find_transcript(target_codes)
-                except NoTranscriptFound:
-                    pass
-                except Exception as e_find:
-                    self.logger.debug(f"[FastTranscriber] find_transcript failed with: {e_find}")
-
-                # 2. If not found, inspect all available transcripts for dialect prefix match (e.g. en-*)
-                if not t_obj:
-                    for t in t_list:
-                        if t.language_code.lower().startswith(lang_code.lower()):
-                            t_obj = t
-                            break
-
-                if not t_obj:
-                    avail_langs = [t.language_code for t in t_list]
-                    self.logger.debug(f"[FastTranscriber] No native transcript found in {target_codes} for '{video_id}'. (Available: {avail_langs})")
-                    return None
-
-                try:
-                    raw_transcript = t_obj.fetch()
-                    detected_lang = t_obj.language_code
-                    is_gen = getattr(t_obj, 'is_generated', False)
-                    gen_str = "auto-generated" if is_gen else "manually created"
-                    self.logger.debug(f"[FastTranscriber] Found {gen_str} {target_language} transcript ({detected_lang}) for '{video_id}'.")
-                except (CouldNotRetrieveTranscript, YouTubeTranscriptApiException, Exception) as e_fetch:
-                    self.logger.debug(f"[FastTranscriber] Failed to fetch transcript data for '{video_id}': {e_fetch}")
-                    return None
-
-            except Exception as e_inner:
-                self.logger.debug(f"[FastTranscriber] Error fetching transcript for '{video_id}': {e_inner}")
-                return None
-
-            if not raw_transcript:
+                raw_transcript = t_obj.fetch()
+                detected_lang = t_obj.language_code
+                is_gen = getattr(t_obj, 'is_generated', False)
+                gen_str = "auto-generated" if is_gen else "manually created"
+                self.logger.debug(f"[FastTranscriber] Found {gen_str} {target_language} transcript ({detected_lang}) for '{video_id}'.")
+            except Exception as e_fetch:
+                self.logger.info(f"[FastTranscriber] Failed to fetch transcript data for '{video_id}': {e_fetch}. Trying yt-dlp fallback...")
                 return self._fetch_ytdlp_native(video_id, target_language)
 
-            words_list = []
-            full_text = []
+        except Exception as e_inner:
+            self.logger.info(f"[FastTranscriber] Direct transcript exception for '{video_id}': {e_inner}. Trying yt-dlp fallback...")
+            return self._fetch_ytdlp_native(video_id, target_language)
 
-            for i, entry in enumerate(raw_transcript):
-                start = float(getattr(entry, 'start', None) if hasattr(entry, 'start') else entry.get('start', 0.0))
-                dur = float(getattr(entry, 'duration', None) if hasattr(entry, 'duration') else entry.get('duration', 0.0))
-                text = (getattr(entry, 'text', None) if hasattr(entry, 'text') else entry.get('text', '')).replace('\n', ' ').strip()
-                if not text:
-                    continue
-                full_text.append(text)
-                
-                # Determine true spoken end time: YouTube display duration overlaps with subsequent snippets.
-                # If the next snippet starts before start + dur, clamp this snippet's end to next snippet's start.
-                if i + 1 < len(raw_transcript):
-                    next_start = float(getattr(raw_transcript[i+1], 'start', None) if hasattr(raw_transcript[i+1], 'start') else raw_transcript[i+1].get('start', 0.0))
-                    if next_start > start:
-                        end = min(start + dur, next_start)
-                    else:
-                        end = start + dur
+        if not raw_transcript:
+            return self._fetch_ytdlp_native(video_id, target_language)
+
+        words_list = []
+        full_text = []
+
+        for i, entry in enumerate(raw_transcript):
+            start = float(getattr(entry, 'start', None) if hasattr(entry, 'start') else entry.get('start', 0.0))
+            dur = float(getattr(entry, 'duration', None) if hasattr(entry, 'duration') else entry.get('duration', 0.0))
+            text = (getattr(entry, 'text', None) if hasattr(entry, 'text') else entry.get('text', '')).replace('\n', ' ').strip()
+            if not text:
+                continue
+            full_text.append(text)
+            
+            # Determine true spoken end time: YouTube display duration overlaps with subsequent snippets.
+            # If the next snippet starts before start + dur, clamp this snippet's end to next snippet's start.
+            if i + 1 < len(raw_transcript):
+                next_start = float(getattr(raw_transcript[i+1], 'start', None) if hasattr(raw_transcript[i+1], 'start') else raw_transcript[i+1].get('start', 0.0))
+                if next_start > start:
+                    end = min(start + dur, next_start)
                 else:
                     end = start + dur
+            else:
+                end = start + dur
 
-                words_list.extend(self._interpolate_words(text, start, end))
+            words_list.extend(self._interpolate_words(text, start, end))
 
-            if not words_list:
-                return self._fetch_ytdlp_native(video_id, target_language)
-
-            self.logger.debug(f"[FastTranscriber] Headless transcript ready ({len(words_list)} words, lang={detected_lang}).")
-            return {
-                "language": detected_lang,
-                "language_probability": 1.0,
-                "duration": words_list[-1]['end'] if words_list else 0,
-                "full_text": " ".join(full_text),
-                "words": words_list
-            }
-        except Exception as e:
-            self.logger.debug(f"[FastTranscriber] Native YouTube API transcript failed for '{video_id}': {e}. Trying yt-dlp fallback...")
+        if not words_list:
             return self._fetch_ytdlp_native(video_id, target_language)
+
+        self.logger.debug(f"[FastTranscriber] Headless transcript ready ({len(words_list)} words, lang={detected_lang}).")
+        return {
+            "language": detected_lang,
+            "language_probability": 1.0,
+            "duration": words_list[-1]['end'] if words_list else 0,
+            "full_text": " ".join(full_text),
+            "words": words_list
+        }
 
     def _fetch_ytdlp_native(self, video_id: str, target_language: str = "en") -> Optional[Dict[str, Any]]:
         """
@@ -218,7 +252,14 @@ class WhisperTranscriber:
                 "quiet": True,
                 "no_warnings": True,
                 "extract_flat": False,
+                "nocheckcertificate": True,
+                "geo_bypass": True,
+                "geo_bypass_country": "US",
+                "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
             }
+            if self.cookies_path and os.path.exists(self.cookies_path):
+                ydl_opts["cookiefile"] = self.cookies_path
+
             url = f"https://www.youtube.com/watch?v={video_id}"
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=False)
@@ -273,11 +314,23 @@ class WhisperTranscriber:
             if not target_url:
                 return None
 
-            req = urllib.request.Request(
-                target_url,
-                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
-            )
-            raw_bytes = urllib.request.urlopen(req, timeout=12).read()
+            raw_bytes = None
+            http_client = self._create_http_client()
+            if http_client:
+                try:
+                    resp = http_client.get(target_url, timeout=15)
+                    if resp.status_code == 200:
+                        raw_bytes = resp.content
+                except Exception:
+                    raw_bytes = None
+
+            if not raw_bytes:
+                req = urllib.request.Request(
+                    target_url,
+                    headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"}
+                )
+                raw_bytes = urllib.request.urlopen(req, timeout=15).read()
+
             raw_str = raw_bytes.decode("utf-8", errors="replace")
 
             words_list = []
