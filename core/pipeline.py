@@ -359,7 +359,10 @@ class ShortsAutomationPipeline:
 
                         # Relevance threshold: at least 1 keyword match in title OR 3 mentions in transcript
                         if title_relevance == 0 and topic_mentions < 3:
-                            self.logger.debug(f"[Tier 1] Candidate '{cand_title}' ({cand_id}) is low relevance to '{topic}'. Skipping...")
+                            self.logger.info(
+                                f"⏭️ [Tier 1] Skipping off-topic video: '{cand_title}' "
+                                f"(Relevance: Title={title_relevance}, Transcript={topic_mentions}/3). Checking next..."
+                            )
                             self.state_tracker.mark_failed(cand_id, reason="skipped_off_topic")
                             continue
 
@@ -521,7 +524,10 @@ class ShortsAutomationPipeline:
                         title_relevance = self._calculate_relevance(cand_title, topic_keywords)
 
                         if title_relevance == 0 and topic_mentions < 3:
-                            self.logger.debug(f"[Tier 2] Candidate '{cand_title}' ({cand_id}) is low relevance to '{topic}'. Skipping...")
+                            self.logger.info(
+                                f"⏭️ [Tier 2] Skipping off-topic video: '{cand_title}' "
+                                f"(Relevance: Title={title_relevance}, Transcript={topic_mentions}/3). Checking next..."
+                            )
                             self.state_tracker.mark_failed(cand_id, reason="skipped_off_topic")
                             continue
 
