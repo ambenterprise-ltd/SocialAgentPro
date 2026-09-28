@@ -5,7 +5,7 @@ import json
 import hashlib
 import threading
 import logging
-from typing import Dict, Any, List, Tuple, Optional
+from typing import Dict, Any, List, Tuple, Optional, Union
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_CONFIG_PATH = os.path.join(BASE_DIR, "settings.json")
@@ -44,6 +44,9 @@ class ConfigManager:
         "caption_color",
         "caption_font",
         "auto_search_keywords",
+        "target_channels",
+        "target_channel_url",
+        "discovery_mode",
         "auto_pilot",
         "autopilot_interval_hours",
         "last_autopilot_run",
@@ -351,6 +354,141 @@ class ConfigManager:
 
         return resolved or tpl
 
+    @staticmethod
+    def parse_channel_urls_text(raw_text: str) -> List[str]:
+        """
+        Parses multi-channel URLs from comma-separated or newline-separated text.
+        Normalizes YouTube channel URLs to end with /videos for flat scraping.
+        """
+        if not raw_text:
+            return []
+        
+        parts = re.split(r"[,;\n\r]+", str(raw_text))
+        channels = []
+        seen = set()
+
+        for part in parts:
+            clean = part.strip()
+            if not clean:
+                continue
+            if clean.startswith("@"):
+                clean = f"https://www.youtube.com/{clean}"
+            elif not clean.startswith("http://") and not clean.startswith("https://"):
+                if "youtube.com" in clean:
+                    clean = f"https://{clean}"
+                else:
+                    clean = f"https://www.youtube.com/@{clean}"
+
+            base_url = clean.split("?")[0].rstrip("/")
+            if not base_url.endswith("/videos") and not base_url.endswith("/shorts") and "/watch" not in base_url:
+                base_url = f"{base_url}/videos"
+
+            if base_url not in seen:
+                seen.add(base_url)
+                channels.append(base_url)
+
+        return channels
+
+    def get_target_channels(self, profile_name: Optional[str] = None) -> List[str]:
+        """Returns the list of configured target channel URLs for the profile."""
+        prof_name = profile_name or self.get_active_profile_name()
+        raw = self.get_channel_setting("target_channels", None, prof_name)
+        if raw is None:
+            single = self.get_channel_setting("target_channel_url", "", prof_name)
+            raw = self.parse_channel_urls_text(single) if single else []
+
+        if isinstance(raw, str):
+            return self.parse_channel_urls_text(raw)
+        elif isinstance(raw, list):
+            norm_list = []
+            for item in raw:
+                parsed = self.parse_channel_urls_text(str(item))
+                for p in parsed:
+                    if p not in norm_list:
+                        norm_list.append(p)
+            return norm_list
+        return []
+
+    def set_target_channels(self, channels: Union[List[str], str], profile_name: Optional[str] = None) -> None:
+        """Sets target channel URLs for profile (both target_channels list and target_channel_url string)."""
+        prof_name = profile_name or self.get_active_profile_name()
+        if isinstance(channels, str):
+            chan_list = self.parse_channel_urls_text(channels)
+        else:
+            chan_list = []
+            for c in channels:
+                for p in self.parse_channel_urls_text(str(c)):
+                    if p not in chan_list:
+                        chan_list.append(p)
+
+        self.set_channel_setting("target_channels", chan_list, prof_name)
+        self.set_channel_setting("target_channel_url", ", ".join(chan_list), prof_name)
+
+    def get_discovery_mode(self, profile_name: Optional[str] = None) -> str:
+        """
+        Returns discovery mode for profile:
+        - 'hybrid' (default): Target Channels First -> Keyword Research Fallback
+        - 'channels_only': Targeted Channels Only
+        - 'keywords_only': Topic Keyword Research Only
+        """
+        prof_name = profile_name or self.get_active_profile_name()
+        val = str(self.get_channel_setting("discovery_mode", "hybrid", prof_name)).strip().lower()
+        if "channel" in val and "only" in val:
+            return "channels_only"
+        elif "keyword" in val or "topic" in val:
+            return "keywords_only"
+        return "hybrid"
+
+    def set_discovery_mode(self, mode: str, profile_name: Optional[str] = None) -> None:
+        """Sets discovery mode ('hybrid', 'channels_only', or 'keywords_only')."""
+        prof_name = profile_name or self.get_active_profile_name()
+        val = str(mode).strip().lower()
+        if "channel" in val and "only" in val:
+            clean_mode = "channels_only"
+        elif "keyword" in val or "topic" in val:
+            clean_mode = "keywords_only"
+        else:
+            clean_mode = "hybrid"
+        self.set_channel_setting("discovery_mode", clean_mode, prof_name)
+
+    @classmethod
+    def resolve_credential_path(cls, path: str, profile_name: Optional[str] = None) -> str:
+        """
+        Dynamically resolves credential JSON paths across machines (Windows/EC2).
+        If hardcoded absolute path doesn't exist, checks relative to project root and Creadintels.
+        """
+        if not path:
+            return ""
+        if os.path.exists(path):
+            return os.path.abspath(path)
+
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        filename = os.path.basename(path)
+
+        candidates = [
+            os.path.join(base_dir, path),
+            os.path.join(base_dir, "Creadintels", filename),
+        ]
+        if profile_name:
+            candidates.insert(1, os.path.join(base_dir, "Creadintels", profile_name, filename))
+            candidates.insert(2, os.path.join(base_dir, "Creadintels", profile_name.replace(" ", "").lower(), filename))
+
+        for cand in candidates:
+            if os.path.exists(cand):
+                return os.path.abspath(cand)
+
+        cread_dir = os.path.join(base_dir, "Creadintels")
+        if os.path.exists(cread_dir):
+            for root, _, files in os.walk(cread_dir):
+                if filename in files:
+                    return os.path.abspath(os.path.join(root, filename))
+                if "client_secret" in filename.lower():
+                    for f in files:
+                        if f.lower().startswith("client_secret") and f.lower().endswith(".json"):
+                            return os.path.abspath(os.path.join(root, f))
+
+        return path
+
     def get_negative_filters(self, profile_name: Optional[str] = None) -> List[str]:
         """Returns list of negative keyword exclusions for the channel profile."""
         prof_name = profile_name or self.get_active_profile_name()
@@ -390,6 +528,9 @@ class ConfigManager:
             "caption_font": "Arial Black",
             "auto_search_keywords": auto_kws,
             "negative_filters": negative_filters,
+            "target_channels": [],
+            "target_channel_url": "",
+            "discovery_mode": "hybrid",
             "auto_pilot": False,
             "autopilot_interval_hours": 2,
             "last_autopilot_run": 0,

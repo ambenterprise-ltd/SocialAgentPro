@@ -204,16 +204,18 @@ class AdminSettingsModal(ctk.CTkToplevel):
         )
         precheck_btn.pack(side="right", padx=(4, 10), pady=8)
 
-        # --- CTkTabview Container (2 Tabs) ---
+        # --- CTkTabview Container (3 Tabs) ---
         self.tabview = ctk.CTkTabview(self, width=560, height=580)
         self.tabview.pack(padx=20, pady=(0, 10), fill="both", expand=True)
 
         self.tab_api = self.tabview.add("🔑 API Keys & Auth")
         self.tab_custom = self.tabview.add("🎨 Customization & Engine")
+        self.tab_sources = self.tabview.add("🎯 Video Sources & Discovery")
 
         # Build tabs
         self._build_api_keys_and_auth_tab()
         self._build_customization_tab()
+        self._build_video_sources_tab()
 
         # Footer Action Buttons
         footer = ctk.CTkFrame(self, fg_color="transparent")
@@ -946,33 +948,6 @@ class AdminSettingsModal(ctk.CTkToplevel):
         )
         cleanup_switch.pack(anchor="w", pady=(0, 15))
 
-        # Target Channel
-        ctk.CTkLabel(
-            frame,
-            text="🎯 Target YouTube Channel (Autopilot Source)",
-            font=ctk.CTkFont(size=14, weight="bold")
-        ).pack(anchor="w", pady=(5, 2))
-
-        self.target_channel_entry = ctk.CTkEntry(frame, width=480, placeholder_text="https://www.youtube.com/@ChannelName")
-        self.target_channel_entry.pack(anchor="w", pady=(0, 10))
-        
-        fetch_type_row = ctk.CTkFrame(frame, fg_color="transparent")
-        fetch_type_row.pack(fill="x", pady=(0, 15))
-        
-        ctk.CTkLabel(
-            fetch_type_row,
-            text="Fetch Strategy (Always Unique):",
-            font=ctk.CTkFont(size=12)
-        ).pack(side="left", padx=(0, 10))
-        
-        self.fetch_type_dropdown = ctk.CTkOptionMenu(
-            fetch_type_row,
-            values=["Viral (Most Viewed)", "Random"],
-            width=200
-        )
-        self.fetch_type_dropdown.set("Viral (Most Viewed)")
-        self.fetch_type_dropdown.pack(side="left")
-
         # History
         ctk.CTkLabel(
             frame,
@@ -1011,6 +986,121 @@ class AdminSettingsModal(ctk.CTkToplevel):
             width=480
         )
         self.new_pass_entry.pack(anchor="w", pady=(0, 10))
+
+    def _build_video_sources_tab(self):
+        """Builds the dedicated Video Sources & Discovery configuration tab."""
+        frame = ctk.CTkScrollableFrame(self.tab_sources)
+        frame.pack(fill="both", expand=True, padx=10, pady=10)
+
+        # --- SECTION 1: DISCOVERY STRATEGY DROPDOWN ---
+        ctk.CTkLabel(
+            frame,
+            text="🎯 Video Discovery & Scraping Mode",
+            font=ctk.CTkFont(size=14, weight="bold")
+        ).pack(anchor="w", pady=(5, 2))
+
+        ctk.CTkLabel(
+            frame,
+            text="Select how the agent searches for source videos on YouTube for this channel profile:",
+            font=ctk.CTkFont(size=11),
+            text_color="gray"
+        ).pack(anchor="w", pady=(0, 6))
+
+        self.discovery_mode_options = [
+            "⚡ Targeted Channels + Keyword Fallback (Recommended)",
+            "🎯 Targeted Channels Only",
+            "🔍 Topic Keyword Research Only"
+        ]
+        self.discovery_mode_dropdown = ctk.CTkOptionMenu(
+            frame,
+            values=self.discovery_mode_options,
+            width=480
+        )
+        self.discovery_mode_dropdown.set(self.discovery_mode_options[0])
+        self.discovery_mode_dropdown.pack(anchor="w", pady=(0, 15))
+
+        # --- SECTION 2: TARGETED YOUTUBE CHANNELS (TIER 1) ---
+        ctk.CTkLabel(
+            frame,
+            text="📺 Targeted YouTube Channels (Tier 1 Source)",
+            font=ctk.CTkFont(size=14, weight="bold")
+        ).pack(anchor="w", pady=(5, 2))
+
+        ctk.CTkLabel(
+            frame,
+            text="Enter YouTube channel URLs separated by commas or new lines:\n(e.g. https://www.youtube.com/@TheDiaryOfACEO, https://www.youtube.com/@HubermanLab)",
+            font=ctk.CTkFont(size=11),
+            text_color="gray"
+        ).pack(anchor="w", pady=(0, 6))
+
+        self.target_channels_textbox = ctk.CTkTextbox(
+            frame,
+            height=130,
+            width=480,
+            font=ctk.CTkFont(size=12)
+        )
+        self.target_channels_textbox.pack(anchor="w", pady=(0, 15))
+
+        # --- SECTION 3: TOPIC FOCUS (THEME / NICHE) ---
+        ctk.CTkLabel(
+            frame,
+            text="🔍 Topic Focus (Core Niche & Relevance Filtering)",
+            font=ctk.CTkFont(size=14, weight="bold")
+        ).pack(anchor="w", pady=(5, 2))
+
+        ctk.CTkLabel(
+            frame,
+            text="Primary topic or niche used to validate candidates and filter off-topic content:",
+            font=ctk.CTkFont(size=11),
+            text_color="gray"
+        ).pack(anchor="w", pady=(0, 6))
+
+        self.topic_focus_entry = ctk.CTkEntry(
+            frame,
+            placeholder_text="wealth, business secrets, and money concepts",
+            width=480
+        )
+        self.topic_focus_entry.pack(anchor="w", pady=(0, 15))
+
+        # --- SECTION 4: AUTO-SEARCH KEYWORDS (TIER 2 RESEARCH) ---
+        ctk.CTkLabel(
+            frame,
+            text="🔑 Auto-Search Keywords (Tier 2 Discovery)",
+            font=ctk.CTkFont(size=14, weight="bold")
+        ).pack(anchor="w", pady=(5, 2))
+
+        ctk.CTkLabel(
+            frame,
+            text="Keywords used to discover fresh episodes across YouTube (separated by commas or new lines):",
+            font=ctk.CTkFont(size=11),
+            text_color="gray"
+        ).pack(anchor="w", pady=(0, 6))
+
+        self.search_keywords_textbox = ctk.CTkTextbox(
+            frame,
+            height=110,
+            width=480,
+            font=ctk.CTkFont(size=12)
+        )
+        self.search_keywords_textbox.pack(anchor="w", pady=(0, 15))
+
+        # --- SECTION 5: FETCH STRATEGY ---
+        fetch_type_row = ctk.CTkFrame(frame, fg_color="transparent")
+        fetch_type_row.pack(fill="x", pady=(0, 15))
+
+        ctk.CTkLabel(
+            fetch_type_row,
+            text="Fetch Strategy (Always Unique):",
+            font=ctk.CTkFont(size=12)
+        ).pack(side="left", padx=(0, 10))
+
+        self.fetch_type_dropdown = ctk.CTkOptionMenu(
+            fetch_type_row,
+            values=["Viral (Most Viewed)", "Random"],
+            width=200
+        )
+        self.fetch_type_dropdown.set("Viral (Most Viewed)")
+        self.fetch_type_dropdown.pack(side="left")
 
     def _load_fields_for_profile(self, profile_name: str):
         """Populates all modal inputs with the settings of the selected profile."""
@@ -1083,12 +1173,44 @@ class AdminSettingsModal(ctk.CTkToplevel):
         autopilot_on = self.config_manager.get_channel_setting("auto_pilot", False, profile_name)
         self.autopilot_var.set(autopilot_on)
 
-        target_url = self.config_manager.get_channel_setting("target_channel_url", "", profile_name)
-        self.target_channel_entry.delete(0, "end")
-        self.target_channel_entry.insert(0, target_url)
-        
+        # Discovery Mode & Video Sources
+        disc_mode = self.config_manager.get_discovery_mode(profile_name)
+        mode_to_label = {
+            "hybrid": "⚡ Targeted Channels + Keyword Fallback (Recommended)",
+            "channels_only": "🎯 Targeted Channels Only",
+            "keywords_only": "🔍 Topic Keyword Research Only"
+        }
+        if hasattr(self, "discovery_mode_dropdown"):
+            self.discovery_mode_dropdown.set(mode_to_label.get(disc_mode, self.discovery_mode_options[0]))
+
+        # Target Channels List
+        chans = self.config_manager.get_target_channels(profile_name)
+        if hasattr(self, "target_channels_textbox"):
+            self.target_channels_textbox.delete("1.0", "end")
+            self.target_channels_textbox.insert("1.0", "\n".join(chans))
+
+        # Topic Focus
+        topic_val = self.config_manager.get_channel_setting("topic_focus", "", profile_name)
+        if not topic_val:
+            ctx = self.config_manager.get_channel_context(profile_name)
+            topic_val = ctx.get("topic_focus", "")
+        if hasattr(self, "topic_focus_entry"):
+            self.topic_focus_entry.delete(0, "end")
+            self.topic_focus_entry.insert(0, topic_val)
+
+        # Auto-Search Keywords
+        kws = self.config_manager.get_channel_setting("auto_search_keywords", [], profile_name)
+        if not kws:
+            ctx = self.config_manager.get_channel_context(profile_name)
+            kws = ctx.get("auto_search_keywords", [])
+        kws_text = "\n".join(kws) if isinstance(kws, list) else str(kws)
+        if hasattr(self, "search_keywords_textbox"):
+            self.search_keywords_textbox.delete("1.0", "end")
+            self.search_keywords_textbox.insert("1.0", kws_text)
+
         fetch_strat = self.config_manager.get_channel_setting("fetch_strategy", "Viral (Most Viewed)", profile_name)
-        self.fetch_type_dropdown.set(fetch_strat)
+        if hasattr(self, "fetch_type_dropdown"):
+            self.fetch_type_dropdown.set(fetch_strat)
 
         hist = self.config_manager.get_channel_setting("processed_video_ids", [], profile_name)
         clips = self.config_manager.get_channel_setting("generated_clips_history", [], profile_name)
@@ -1584,8 +1706,7 @@ class AdminSettingsModal(ctk.CTkToplevel):
             captions_on = self.enable_captions_var.get()
             face_on = self.face_tracker_var.get()
 
-            target_channel = self.target_channel_entry.get().strip()
-            fetch_strat = self.fetch_type_dropdown.get()
+            fetch_strat = self.fetch_type_dropdown.get() if hasattr(self, "fetch_type_dropdown") else "Viral (Most Viewed)"
 
             new_pass = self.new_pass_entry.get().strip()
 
@@ -1665,7 +1786,32 @@ class AdminSettingsModal(ctk.CTkToplevel):
                 self.config_manager.set_channel_setting("next_autopilot_run", 0, active_prof)
                 if old_autopilot:
                     self.logger.info(f"[Auto-Pilot] Autopilot DISABLED for '{active_prof}'.")
-            self.config_manager.set_channel_setting("target_channel_url", target_channel, active_prof)
+
+            # Save Video Sources, Discovery Mode & Keywords
+            if hasattr(self, "discovery_mode_dropdown"):
+                label_to_mode = {
+                    "⚡ Targeted Channels + Keyword Fallback (Recommended)": "hybrid",
+                    "🎯 Targeted Channels Only": "channels_only",
+                    "🔍 Topic Keyword Research Only": "keywords_only"
+                }
+                chosen_label = self.discovery_mode_dropdown.get()
+                disc_mode = label_to_mode.get(chosen_label, "hybrid")
+                self.config_manager.set_discovery_mode(disc_mode, active_prof)
+
+            if hasattr(self, "target_channels_textbox"):
+                raw_chans = self.target_channels_textbox.get("1.0", "end")
+                self.config_manager.set_target_channels(raw_chans, active_prof)
+
+            if hasattr(self, "topic_focus_entry"):
+                topic_val = self.topic_focus_entry.get().strip()
+                if topic_val:
+                    self.config_manager.set_channel_setting("topic_focus", topic_val, active_prof)
+
+            if hasattr(self, "search_keywords_textbox"):
+                raw_kws = self.search_keywords_textbox.get("1.0", "end").strip()
+                parsed_kws = [k.strip() for k in re.split(r"[\r\n,]+", raw_kws) if k.strip()]
+                self.config_manager.set_channel_setting("auto_search_keywords", parsed_kws, active_prof)
+
             self.config_manager.set_channel_setting("fetch_strategy", fetch_strat, active_prof)
             if hasattr(self, "caption_language_combo"):
                 self.config_manager.set_caption_language(self.caption_language_combo.get().strip(), active_prof)

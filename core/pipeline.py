@@ -249,149 +249,173 @@ class ShortsAutomationPipeline:
             if not transcript_data or not transcript_data.get("words"):
                 raise ValueError(f"Could not retrieve or generate transcript for video '{video_id}'.")
         else:
-            if is_channel_url:
-                target_channel = manual_url
-                self.logger.info(f"[Pipeline] Detected Channel URL entered in URL field: '{target_channel}'. Updating channel settings...")
-                self.config_manager.set_channel_setting("target_channel_url", target_channel, chan_name)
-                self.config_manager.save_config()
-            else:
-                target_channel = self.config_manager.get_channel_setting("target_channel_url", "", chan_name)
+            # Determine discovery mode & target channels from configuration
+            discovery_mode = self.config_manager.get_discovery_mode(chan_name)  # "hybrid", "channels_only", "keywords_only"
+            target_channels = self.config_manager.get_target_channels(chan_name)
 
-            if not target_channel:
-                self.logger.info("[Pipeline] No Target Channel URL provided. Will use topic search keywords...")
+            if is_channel_url:
+                if manual_url not in target_channels:
+                    target_channels.insert(0, manual_url)
+                self.logger.info(f"[Pipeline] Channel URL provided in dashboard: '{manual_url}'. Setting as primary target channel.")
+                self.config_manager.set_target_channels(target_channels, chan_name)
+                self.config_manager.save_config()
 
             auto_kws = self.config_manager.get_channel_setting("auto_search_keywords", [], chan_name)
             if not auto_kws:
                 ctx = self.config_manager.get_channel_context(chan_name)
                 auto_kws = ctx.get("auto_search_keywords", [])
             topic_keywords = self._extract_topic_keywords(topic, auto_kws)
+            negative_filters = self.config_manager.get_negative_filters(chan_name)
+            ctx = self.config_manager.get_channel_context(chan_name)
+            content_type = ctx.get("content_type", "podcast")
 
-            candidates = []
-            if target_channel:
-                self.logger.info(f"🔍 [Discovery] Checking recent videos from channel: {target_channel}...")
-                try:
-                    candidates = ingestion.fetch_channel_recent_videos(target_channel, limit=30)
-                except Exception as e:
-                    self.logger.warning(f"[Pipeline] Failed to fetch recent videos from '{target_channel}': {e}")
+            channel_candidate_pool = []
 
-            # Filter out processed & failed videos
-            unprocessed = self.state_tracker.filter_unprocessed(candidates)
-
-            # If all recent 30 videos are processed/skipped, check retryable channel candidates or deep scrape
-            if not unprocessed and candidates:
-                self.logger.debug(f"[Pipeline] Initial channel videos seen. Checking retryable channel candidates...")
-                unprocessed = self.state_tracker.filter_unprocessed(candidates, allow_retry_failed=True)
-                if not unprocessed and target_channel:
-                    try:
-                        self.logger.info(f"🔍 [Discovery] Deep scraping channel '{target_channel}' (depth=60)...")
-                        more_candidates = ingestion.fetch_channel_recent_videos(target_channel, limit=60)
-                        unprocessed = self.state_tracker.filter_unprocessed(more_candidates, allow_retry_failed=True)
-                        if unprocessed:
-                            candidates = more_candidates
-                    except Exception as de:
-                        self.logger.debug(f"[Pipeline] Deep scrape failed: {de}")
-
-            # Rank channel candidates by title relevance to topic keywords
-            if unprocessed:
-                unprocessed.sort(
-                    key=lambda c: self._calculate_relevance(c.get("title", ""), topic_keywords),
-                    reverse=True
+            # =========================================================================
+            # TIER 1: TARGETED CHANNELS DISCOVERY
+            # =========================================================================
+            if discovery_mode in ("channels_only", "hybrid") and target_channels:
+                self.logger.info(
+                    f"🎯 [Discovery - Tier 1] Checking {len(target_channels)} target channel(s) for '{chan_name}' (Mode: {discovery_mode})..."
                 )
 
-            negative_filters = self.config_manager.get_negative_filters(chan_name)
-            self.logger.debug(f"[Pipeline] Evaluating {len(unprocessed)} candidate videos for topic '{topic}'...")
+                for ch_idx, target_channel in enumerate(target_channels):
+                    if stop_checker and stop_checker():
+                        self.logger.warning("Pipeline halted by user.")
+                        return []
 
-            # Iterate through channel candidates and validate transcript relevance
-            for cand in unprocessed:
-                if stop_checker and stop_checker():
-                    self.logger.warning("Pipeline halted by user.")
-                    return []
-
-                cand_id = cand["id"]
-                cand_title = cand.get("title", cand_id)
-                cand_url = cand.get("url", f"https://www.youtube.com/watch?v={cand_id}")
-                cand_dur = cand.get("duration", 0) or 0
-
-                # Shorts & duration check (require >= 300s)
-                if "/shorts/" in cand_url.lower() or "#shorts" in cand_title.lower() or "#short" in cand_title.lower():
-                    self.logger.debug(f"[Pipeline] Candidate '{cand_title}' ({cand_id}) is a Short. Skipping...")
-                    self.state_tracker.mark_failed(cand_id, reason="skipped_short")
-                    continue
-                if cand_dur and 0 < cand_dur < 300:
-                    self.logger.debug(f"[Pipeline] Candidate '{cand_title}' ({cand_id}) duration ({cand_dur}s) < 300s. Skipping...")
-                    self.state_tracker.mark_failed(cand_id, reason="skipped_too_short")
-                    continue
-
-                # Regional Hindi/Urdu/Indian exclusion filter when English is required
-                if lang_code == "en":
-                    regional_exclusions = [
-                        "hindi", "urdu", "ankur warikoo", "warikoo",
-                        "raj shamani", "ranveer", "tanmay", "marwari",
-                        "crorepati", "indian", "india"
-                    ]
-                    if any(reg in cand_title.lower() for reg in regional_exclusions):
-                        self.logger.debug(
-                            f"[Pipeline] Candidate '{cand_title}' ({cand_id}) matches regional South Asian filter. Skipping..."
-                        )
-                        self.state_tracker.mark_failed(cand_id, reason="skipped_regional_language")
+                    self.logger.info(f"🔍 [Tier 1] [{ch_idx + 1}/{len(target_channels)}] Fetching recent videos from: {target_channel}...")
+                    try:
+                        cands = ingestion.fetch_channel_recent_videos(target_channel, limit=25)
+                    except Exception as e:
+                        self.logger.warning(f"[Tier 1] Could not fetch videos from '{target_channel}': {e}")
                         continue
 
-                # Negative filter exclusion check
-                if negative_filters and any(neg.lower() in cand_title.lower() for neg in negative_filters):
-                    self.logger.debug(
-                        f"[Pipeline] Candidate '{cand_title}' ({cand_id}) matches negative filter. Skipping..."
+                    if not cands:
+                        continue
+
+                    channel_candidate_pool.extend(cands)
+                    unprocessed = self.state_tracker.filter_unprocessed(cands)
+
+                    if not unprocessed:
+                        self.logger.debug(f"[Tier 1] All recent videos from '{target_channel}' already seen. Checking retryable candidates...")
+                        unprocessed = self.state_tracker.filter_unprocessed(cands, allow_retry_failed=True)
+
+                    if not unprocessed:
+                        continue
+
+                    # Rank candidates by topic keyword relevance
+                    unprocessed.sort(
+                        key=lambda c: self._calculate_relevance(c.get("title", ""), topic_keywords),
+                        reverse=True
                     )
-                    self.state_tracker.mark_failed(cand_id, reason="skipped_negative_filter")
-                    continue
 
-                self.logger.debug(f"[Pipeline] Checking transcript & topic relevance for '{cand_title}' ({cand_id})...")
-                cache_suffix = f"_{lang_code}" if lang_code != "en" else ""
-                cache_json = os.path.join(transcripts_dir, f"{cand_id}{cache_suffix}_transcript.json")
-                t_data = transcriber.fetch_headless_transcript(cand_id, cache_json_path=cache_json, language=lang_code)
+                    for cand in unprocessed:
+                        if stop_checker and stop_checker():
+                            self.logger.warning("Pipeline halted by user.")
+                            return []
 
-                if not t_data or not t_data.get("words"):
-                    self.logger.debug(f"[Pipeline] Candidate '{cand_id}' has no transcript available. Skipping...")
-                    self.state_tracker.mark_failed(cand_id, reason="failed_no_transcript")
-                    continue
+                        cand_id = cand["id"]
+                        cand_title = cand.get("title", cand_id)
+                        cand_url = cand.get("url", f"https://www.youtube.com/watch?v={cand_id}")
+                        cand_dur = cand.get("duration", 0) or 0
 
-                words = t_data.get("words", [])
-                topic_mentions = self._count_transcript_topic_mentions(words, topic_keywords, max_seconds=1200.0)
+                        # Shorts & duration check (require >= 300s)
+                        if "/shorts/" in cand_url.lower() or "#shorts" in cand_title.lower() or "#short" in cand_title.lower():
+                            self.state_tracker.mark_failed(cand_id, reason="skipped_short")
+                            continue
+                        if cand_dur and 0 < cand_dur < 300:
+                            self.state_tracker.mark_failed(cand_id, reason="skipped_too_short")
+                            continue
 
-                # Pre-validation: Require at least 3 topic keyword mentions in the first 20 minutes
-                # (or at least 1 keyword match in the title) to prevent wasting LLM calls on off-topic videos.
-                title_relevance = self._calculate_relevance(cand_title, topic_keywords)
-                if title_relevance == 0 and topic_mentions < 3:
-                    self.logger.debug(
-                        f"[Pipeline] Candidate '{cand_title}' ({cand_id}) has low relevance to '{topic}'. Skipping..."
+                        # Regional South Asian filter when English is required
+                        if lang_code == "en":
+                            regional_exclusions = [
+                                "hindi", "urdu", "ankur warikoo", "warikoo",
+                                "raj shamani", "ranveer", "tanmay", "marwari",
+                                "crorepati", "indian", "india"
+                            ]
+                            if any(reg in cand_title.lower() for reg in regional_exclusions):
+                                self.state_tracker.mark_failed(cand_id, reason="skipped_regional_language")
+                                continue
+
+                        # Negative filter exclusion check
+                        if negative_filters and any(neg.lower() in cand_title.lower() for neg in negative_filters):
+                            self.state_tracker.mark_failed(cand_id, reason="skipped_negative_filter")
+                            continue
+
+                        self.logger.debug(f"[Tier 1] Checking transcript for '{cand_title}' ({cand_id})...")
+                        cache_suffix = f"_{lang_code}" if lang_code != "en" else ""
+                        cache_json = os.path.join(transcripts_dir, f"{cand_id}{cache_suffix}_transcript.json")
+                        t_data = transcriber.fetch_headless_transcript(cand_id, cache_json_path=cache_json, language=lang_code)
+
+                        if not t_data or not t_data.get("words"):
+                            self.state_tracker.mark_failed(cand_id, reason="failed_no_transcript")
+                            continue
+
+                        words = t_data.get("words", [])
+                        topic_mentions = self._count_transcript_topic_mentions(words, topic_keywords, max_seconds=1200.0)
+                        title_relevance = self._calculate_relevance(cand_title, topic_keywords)
+
+                        # Relevance threshold: at least 1 keyword match in title OR 3 mentions in transcript
+                        if title_relevance == 0 and topic_mentions < 3:
+                            self.logger.debug(f"[Tier 1] Candidate '{cand_title}' ({cand_id}) is low relevance to '{topic}'. Skipping...")
+                            self.state_tracker.mark_failed(cand_id, reason="skipped_off_topic")
+                            continue
+
+                        # Candidate validated successfully!
+                        video_id = cand_id
+                        target_url = cand_url
+                        video_title = cand_title
+                        transcript_data = t_data
+                        self.logger.info(f"📺 [Tier 1] Locked onto target channel video: '{video_title}' ({video_id})")
+                        break
+
+                    if video_id and transcript_data:
+                        break
+
+            # Handle channels_only exhaustion / fallback
+            if discovery_mode == "channels_only" and (not video_id or not transcript_data):
+                if channel_candidate_pool:
+                    self.logger.info("⚡ [Tier 1] Trying Whisper audio fallback for top target channel candidate...")
+                    top_cand = channel_candidate_pool[0]
+                    cand_id = top_cand.get("id")
+                    cand_url = top_cand.get("url") or f"https://www.youtube.com/watch?v={cand_id}"
+                    cand_title = top_cand.get("title", cand_id)
+                    cache_suffix = f"_{lang_code}" if lang_code != "en" else ""
+                    cache_json = os.path.join(transcripts_dir, f"{cand_id}{cache_suffix}_transcript.json")
+                    key_pool = self.config_manager.get_api_key_pool(chan_name)
+                    try:
+                        audio_info = ingestion.download_and_extract_audio(cand_url, target_height=360)
+                        t_data = transcriber.transcribe(audio_info["audio_path"], cache_json_path=cache_json, api_key=key_pool, language=lang_code)
+                        if t_data and t_data.get("words"):
+                            video_id = cand_id
+                            target_url = cand_url
+                            video_title = cand_title
+                            transcript_data = t_data
+                            self.logger.info(f"📺 [Tier 1] Audio Whisper transcription succeeded! Locked onto: '{video_title}' ({video_id})")
+                    except Exception as we:
+                        self.logger.warning(f"[Tier 1] Whisper fallback failed: {we}")
+
+                if not video_id or not transcript_data:
+                    raise ValueError(
+                        f"All videos from configured target channel(s) ({len(target_channels)}) have been processed or lack transcripts. "
+                        f"Discovery Mode is set to 'Targeted Channels Only'. "
+                        f"To search across YouTube, switch Discovery Mode to 'Targeted Channels + Keyword Fallback' in Admin Settings."
                     )
-                    self.state_tracker.mark_failed(cand_id, reason="skipped_off_topic")
-                    continue
 
-                video_id = cand_id
-                target_url = cand_url
-                video_title = cand_title
-                transcript_data = t_data
-                self.logger.info(
-                    f"📺 [Discovery] Locked onto topic video: '{video_title}' ({video_id})"
-                )
-                break
-
-            # Fallback to YouTube topic discovery if channel candidates were off-topic or exhausted
+            # =========================================================================
+            # TIER 2: TOPIC KEYWORD RESEARCH DISCOVERY
+            # =========================================================================
             if not video_id or not transcript_data:
-                ctx = self.config_manager.get_channel_context(chan_name)
-                content_type = ctx.get("content_type", "podcast")
-                self.logger.info(
-                    f"🔍 [Discovery] Searching YouTube for '{topic}' ({content_type})..."
-                )
+                self.logger.info(f"🔍 [Discovery - Tier 2] Searching YouTube for topic '{topic}' ({content_type})...")
 
-                # Tune topic search terms with full-length intent keywords and enforce American/US English
                 search_queries = []
                 if topic and topic.strip():
                     topic_clean = topic.strip()
                     if lang_code == "en":
                         search_queries.append(f"{topic_clean} American {content_type} interview full episode US")
                         search_queries.append(f"{topic_clean} American podcast interview US")
-                        search_queries.append(f"{topic_clean} American full episode interview US")
                     else:
                         search_queries.append(f"{topic_clean} {content_type} interview full episode")
                         search_queries.append(f"{topic_clean} full episode interview")
@@ -408,7 +432,7 @@ class ShortsAutomationPipeline:
                         else:
                             search_queries.append(kw_clean)
                 else:
-                    search_queries.extend(ctx.get("auto_search_keywords", [f"{topic} American {content_type} interview full episode US"]))
+                    search_queries.append(f"{topic} American {content_type} interview full episode US")
 
                 topic_candidates = ingestion.search_youtube_topic_podcasts(
                     search_queries=search_queries,
@@ -420,16 +444,13 @@ class ShortsAutomationPipeline:
                 )
                 unprocessed_search = self.state_tracker.filter_unprocessed(topic_candidates)
 
-                # Secondary search fallback if all initial candidates were already processed/failed
+                # Secondary search query expansion if initial batch is already processed
                 if not unprocessed_search:
-                    self.logger.info(
-                        f"🔍 [Discovery] Initial candidates processed. Expanding search for '{topic}'..."
-                    )
+                    self.logger.info(f"🔍 [Discovery - Tier 2] Expanding search queries for '{topic}'...")
                     secondary_queries = [
-                        f"{topic} American podcast full episode US",
-                        f"{topic} American interview full episode US",
-                        f"{content_type} {topic} American full video US",
-                        f"best {topic} American podcast conversation US"
+                        f"{topic} American podcast full episode US" if lang_code == "en" else f"{topic} podcast full episode",
+                        f"{topic} American interview full episode US" if lang_code == "en" else f"{topic} interview full episode",
+                        f"best {topic} conversation full episode"
                     ]
                     topic_candidates = ingestion.search_youtube_topic_podcasts(
                         search_queries=secondary_queries,
@@ -441,179 +462,113 @@ class ShortsAutomationPipeline:
                     )
                     unprocessed_search = self.state_tracker.filter_unprocessed(topic_candidates)
 
-                # Tertiary dynamic search if all standard search results were seen
-                if not unprocessed_search:
-                    import random
-                    year_mods = ["2024", "2025", "recent", "exclusive", "masterclass", "insights"]
-                    chosen_mod = random.choice(year_mods)
-                    tertiary_queries = [
-                        f"{topic} {chosen_mod} podcast interview",
-                        f"{topic} full episode conversation",
-                        f"{topic} business advice interview"
-                    ]
-                    self.logger.info(f"🔍 [Discovery] Deep searching YouTube with dynamic queries: {tertiary_queries}...")
-                    topic_candidates = ingestion.search_youtube_topic_podcasts(
-                        search_queries=tertiary_queries,
-                        limit=50,
-                        negative_filters=negative_filters,
-                        min_duration=300,
-                        target_count=50,
-                        language=lang_code
-                    )
-                    unprocessed_search = self.state_tracker.filter_unprocessed(topic_candidates)
-
-                # Retry Fallback: Re-evaluate candidates that previously failed or were skipped (never published into shorts)
-                if not unprocessed_search:
-                    self.logger.info(
-                        f"⚡ [Discovery] Re-evaluating previously skipped candidates with advanced Whisper/yt-dlp engine..."
-                    )
+                # Allow retrying candidates that previously failed or were skipped
+                if not unprocessed_search and topic_candidates:
+                    self.logger.info("⚡ [Discovery - Tier 2] Checking retryable search candidates...")
                     unprocessed_search = self.state_tracker.filter_unprocessed(topic_candidates, allow_retry_failed=True)
 
-                if not unprocessed_search and candidates:
-                    unprocessed_search = self.state_tracker.filter_unprocessed(candidates, allow_retry_failed=True)
-
-                # Ultimate Fallback: Broad global YouTube search
-                if not unprocessed_search:
-                    self.logger.info(f"🔍 [Discovery] Launching global YouTube search for '{topic}'...")
-                    broad_candidates = ingestion.search_youtube_topic_podcasts(
-                        search_queries=[f"{topic} podcast full episode", f"{topic} interview full"],
-                        limit=50,
-                        min_duration=180,
-                        target_count=50
-                    )
-                    unprocessed_search = self.state_tracker.filter_unprocessed(broad_candidates, allow_retry_failed=True)
-
-                if not unprocessed_search:
-                    raise ValueError(
-                        f"No new videos found matching topic '{topic}' across YouTube. "
-                        f"Please verify internet connectivity or try adjusting the topic focus."
+                if unprocessed_search:
+                    unprocessed_search.sort(
+                        key=lambda c: self._calculate_relevance(c.get("title", ""), topic_keywords),
+                        reverse=True
                     )
 
-                # Rank search candidates by title topic match
-                unprocessed_search.sort(
-                    key=lambda c: self._calculate_relevance(c.get("title", ""), topic_keywords),
-                    reverse=True
-                )
+                    for cand in unprocessed_search:
+                        if stop_checker and stop_checker():
+                            self.logger.warning("Pipeline halted by user.")
+                            return []
 
-                for cand in unprocessed_search:
-                    if stop_checker and stop_checker():
-                        self.logger.warning("Pipeline halted by user.")
-                        return []
+                        cand_id = cand["id"]
+                        cand_title = cand.get("title", cand_id)
+                        cand_url = cand.get("url", f"https://www.youtube.com/watch?v={cand_id}")
+                        cand_dur = cand.get("duration", 0) or 0
 
-                    cand_id = cand["id"]
-                    cand_title = cand.get("title", cand_id)
-                    cand_url = cand.get("url", f"https://www.youtube.com/watch?v={cand_id}")
-                    cand_dur = cand.get("duration", 0) or 0
-
-                    # Shorts & duration check (require >= 300s)
-                    if "/shorts/" in cand_url.lower() or "#shorts" in cand_title.lower() or "#short" in cand_title.lower():
-                        self.logger.debug(f"[Pipeline] Search candidate '{cand_title}' ({cand_id}) is a Short. Skipping...")
-                        self.state_tracker.mark_failed(cand_id, reason="skipped_short")
-                        continue
-                    if cand_dur and 0 < cand_dur < 300:
-                        self.logger.debug(f"[Pipeline] Search candidate '{cand_title}' ({cand_id}) duration ({cand_dur}s) < 300s. Skipping...")
-                        self.state_tracker.mark_failed(cand_id, reason="skipped_too_short")
-                        continue
-
-                    # Regional Hindi/Urdu/Indian exclusion filter when English is required
-                    if lang_code == "en":
-                        regional_exclusions = [
-                            "hindi", "urdu", "ankur warikoo", "warikoo",
-                            "raj shamani", "ranveer", "tanmay", "marwari",
-                            "crorepati", "indian", "india"
-                        ]
-                        if any(reg in cand_title.lower() for reg in regional_exclusions):
-                            self.logger.debug(
-                                f"[Pipeline] Search candidate '{cand_title}' ({cand_id}) matches regional South Asian filter. Skipping..."
-                            )
-                            self.state_tracker.mark_failed(cand_id, reason="skipped_regional_language")
+                        # Shorts & duration check (require >= 300s)
+                        if "/shorts/" in cand_url.lower() or "#shorts" in cand_title.lower() or "#short" in cand_title.lower():
+                            self.state_tracker.mark_failed(cand_id, reason="skipped_short")
+                            continue
+                        if cand_dur and 0 < cand_dur < 300:
+                            self.state_tracker.mark_failed(cand_id, reason="skipped_too_short")
                             continue
 
-                    # Negative filter exclusion check
-                    if negative_filters and any(neg.lower() in cand_title.lower() for neg in negative_filters):
-                        self.logger.debug(
-                            f"[Pipeline] Search candidate '{cand_title}' matches negative filter. Skipping..."
+                        # Regional South Asian filter when English is required
+                        if lang_code == "en":
+                            regional_exclusions = [
+                                "hindi", "urdu", "ankur warikoo", "warikoo",
+                                "raj shamani", "ranveer", "tanmay", "marwari",
+                                "crorepati", "indian", "india"
+                            ]
+                            if any(reg in cand_title.lower() for reg in regional_exclusions):
+                                self.state_tracker.mark_failed(cand_id, reason="skipped_regional_language")
+                                continue
+
+                        # Negative filter exclusion check
+                        if negative_filters and any(neg.lower() in cand_title.lower() for neg in negative_filters):
+                            self.state_tracker.mark_failed(cand_id, reason="skipped_negative_filter")
+                            continue
+
+                        self.logger.debug(f"[Tier 2] Checking transcript for '{cand_title}' ({cand_id})...")
+                        cache_suffix = f"_{lang_code}" if lang_code != "en" else ""
+                        cache_json = os.path.join(transcripts_dir, f"{cand_id}{cache_suffix}_transcript.json")
+                        t_data = transcriber.fetch_headless_transcript(cand_id, cache_json_path=cache_json, language=lang_code)
+
+                        if not t_data or not t_data.get("words"):
+                            self.state_tracker.mark_failed(cand_id, reason="failed_no_transcript")
+                            continue
+
+                        words = t_data.get("words", [])
+                        topic_mentions = self._count_transcript_topic_mentions(words, topic_keywords, max_seconds=1200.0)
+                        title_relevance = self._calculate_relevance(cand_title, topic_keywords)
+
+                        if title_relevance == 0 and topic_mentions < 3:
+                            self.logger.debug(f"[Tier 2] Candidate '{cand_title}' ({cand_id}) is low relevance to '{topic}'. Skipping...")
+                            self.state_tracker.mark_failed(cand_id, reason="skipped_off_topic")
+                            continue
+
+                        video_id = cand_id
+                        target_url = cand_url
+                        video_title = cand_title
+                        transcript_data = t_data
+                        self.logger.info(f"📺 [Tier 2] Locked onto topic video: '{video_title}' ({video_id})")
+                        break
+
+                # Robust Groq Whisper Fallback if headless transcripts failed across candidate pool
+                if not video_id or not transcript_data:
+                    fallback_pool = topic_candidates if 'topic_candidates' in locals() and topic_candidates else channel_candidate_pool
+                    if fallback_pool:
+                        top_cand = fallback_pool[0]
+                        cand_id = top_cand.get("id")
+                        cand_url = top_cand.get("url") or f"https://www.youtube.com/watch?v={cand_id}"
+                        cand_title = top_cand.get("title", cand_id)
+
+                        self.logger.info(
+                            f"⚡ [Tier 2] Headless transcripts unavailable on network. "
+                            f"Downloading lightweight audio stream for Groq Whisper: '{cand_title}' ({cand_id})..."
                         )
-                        self.state_tracker.mark_failed(cand_id, reason="skipped_negative_filter")
-                        continue
-
-                    self.logger.debug(f"[Pipeline] Checking transcript for '{cand_title}' ({cand_id})...")
-                    cache_suffix = f"_{lang_code}" if lang_code != "en" else ""
-                    cache_json = os.path.join(transcripts_dir, f"{cand_id}{cache_suffix}_transcript.json")
-                    t_data = transcriber.fetch_headless_transcript(cand_id, cache_json_path=cache_json, language=lang_code)
-
-                    if not t_data or not t_data.get("words"):
-                        self.logger.debug(
-                            f"[Pipeline] Search candidate '{cand_title}' ({cand_id}) has no extractable '{lang_code}' transcript. Skipping..."
-                        )
-                        self.state_tracker.mark_failed(cand_id, reason="failed_no_transcript")
-                        continue
-
-                    words = t_data.get("words", [])
-                    topic_mentions = self._count_transcript_topic_mentions(words, topic_keywords, max_seconds=1200.0)
-
-                    title_relevance = self._calculate_relevance(cand_title, topic_keywords)
-                    if title_relevance == 0 and topic_mentions < 3:
-                        self.logger.debug(
-                            f"[Pipeline] Search candidate '{cand_title}' ({cand_id}) has low relevance to '{topic}'. Skipping..."
-                        )
-                        self.state_tracker.mark_failed(cand_id, reason="skipped_off_topic")
-                        continue
-
-                    video_id = cand_id
-                    target_url = cand_url
-                    video_title = cand_title
-                    transcript_data = t_data
-                    self.logger.info(
-                        f"📺 [Discovery] Locked onto topic video: '{video_title}' ({video_id})"
-                    )
-                    break
-
-            if not video_id or not transcript_data:
-                # Robust Fallback: If cloud IP blocks all headless transcripts or videos lack captions,
-                # pick the highest-ranked candidate and transcribe via audio + Groq Whisper
-                fallback_pool = []
-                if 'topic_candidates' in locals() and topic_candidates:
-                    fallback_pool = topic_candidates
-                elif unprocessed:
-                    fallback_pool = unprocessed
-                elif candidates:
-                    fallback_pool = candidates
-
-                if fallback_pool:
-                    top_cand = fallback_pool[0]
-                    cand_id = top_cand.get("id")
-                    cand_url = top_cand.get("url") or f"https://www.youtube.com/watch?v={cand_id}"
-                    cand_title = top_cand.get("title", cand_id)
-
-                    self.logger.info(
-                        f"⚡ [Discovery] Headless transcripts unavailable on network for candidate pool. "
-                        f"Falling back to audio download + Groq Whisper for top candidate: '{cand_title}' ({cand_id})..."
-                    )
-                    cache_suffix = f"_{lang_code}" if lang_code != "en" else ""
-                    cache_json = os.path.join(transcripts_dir, f"{cand_id}{cache_suffix}_transcript.json")
-                    key_pool = self.config_manager.get_api_key_pool(chan_name)
-                    try:
-                        audio_info = ingestion.download_and_extract_audio(cand_url, target_height=360)
-                        t_data = transcriber.transcribe(
-                            audio_info["audio_path"],
-                            cache_json_path=cache_json,
-                            api_key=key_pool,
-                            language=lang_code
-                        )
-                        if t_data and t_data.get("words"):
-                            video_id = cand_id
-                            target_url = cand_url
-                            video_title = cand_title
-                            transcript_data = t_data
-                            self.logger.info(f"📺 [Discovery] Audio Whisper transcription succeeded! Locked onto: '{video_title}' ({video_id})")
-                    except Exception as we:
-                        self.logger.error(f"[Pipeline] Audio Whisper fallback failed for '{cand_id}': {we}")
+                        cache_suffix = f"_{lang_code}" if lang_code != "en" else ""
+                        cache_json = os.path.join(transcripts_dir, f"{cand_id}{cache_suffix}_transcript.json")
+                        key_pool = self.config_manager.get_api_key_pool(chan_name)
+                        try:
+                            audio_info = ingestion.download_and_extract_audio(cand_url, target_height=360)
+                            t_data = transcriber.transcribe(
+                                audio_info["audio_path"],
+                                cache_json_path=cache_json,
+                                api_key=key_pool,
+                                language=lang_code
+                            )
+                            if t_data and t_data.get("words"):
+                                video_id = cand_id
+                                target_url = cand_url
+                                video_title = cand_title
+                                transcript_data = t_data
+                                self.logger.info(f"📺 [Tier 2] Audio Whisper transcription succeeded! Locked onto: '{video_title}' ({video_id})")
+                        except Exception as we:
+                            self.logger.error(f"[Tier 2] Audio Whisper fallback failed: {we}")
 
             if not video_id or not transcript_data:
                 raise ValueError(
                     f"Could not find any available video with a valid transcript matching topic '{topic}'. "
-                    f"Tested and exhausted candidates in search pool."
+                    f"Tested and exhausted candidates across configured discovery sources."
                 )
 
         # --- PHASE 4: Groq LLM Clip Selection (50s - 58s) ---

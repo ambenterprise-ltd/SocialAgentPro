@@ -357,112 +357,84 @@ class MediaIngestionEngine:
     def download_and_extract_audio(
         self,
         url: str,
-        target_height: int = 1080,
-        progress_callback: Optional[Callable[[float, str], None]] = None
+        target_height: int = 360,
+        progress_callback: Optional[Callable[[float, str], None]] = None,
+        max_duration_seconds: int = 1500
     ) -> Dict[str, str]:
         """
-        Downloads video stream in selected target resolution (1080p, 720p, 480p, 360p, 240p)
-        and extracts 16kHz mono WAV audio file.
+        Fast Audio Stream Downloader for Groq Whisper.
+        Directly extracts 16kHz mono WAV audio stream without downloading video payload.
+        Caps audio download to max_duration_seconds (default 25 mins) for multi-hour podcasts.
         SMART RESUME: Automatically skips downloading/extraction if files already exist on disk.
         """
         info = self.fetch_video_info(url)
         video_id = info["id"]
+        vid_dur = float(info.get("duration") or 0)
 
         work_dir = os.path.join(self.output_dir, video_id)
         os.makedirs(work_dir, exist_ok=True)
 
-        video_filename = f"{video_id}_source_{target_height}p.mp4"
-        audio_filename = f"{video_id}_audio_16k.wav"
-
-        video_path = os.path.join(work_dir, video_filename)
-        audio_path = os.path.join(work_dir, audio_filename)
-
-        # --- SMART RESUME: CHECK VIDEO payload ---
-        if os.path.exists(video_path) and os.path.getsize(video_path) > 10000:
-            self.logger.info(f"[Smart Resume] Source video already downloaded ({video_path}). Skipping video download.")
-            if progress_callback:
-                progress_callback(100.0, "Video download cached.")
-        else:
-            def _yt_progress_hook(d):
-                if d.get("status") == "downloading":
-                    total = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
-                    downloaded = d.get("downloaded_bytes", 0)
-                    if total > 0:
-                        percentage = (downloaded / total) * 100
-                        speed = d.get("_speed_str", "N/A")
-                        eta = d.get("_eta_str", "N/A")
-                        msg = f"Downloading ({target_height}p): {percentage:.1f}% ({speed}, ETA {eta})"
-                        if progress_callback:
-                            progress_callback(percentage, msg)
-
-            self.logger.info(f"[Ingestion] Downloading video at target resolution ({target_height}p) for: '{info['title']}'...")
-
-            format_spec = (
-                f"bestvideo[height<={target_height}][ext=mp4]+bestaudio[ext=m4a]/"
-                f"bestvideo[height<={target_height}]+bestaudio/"
-                f"best[height<={target_height}]/best"
-            )
-
-            ydl_video_opts = {
-                "format": format_spec,
-                "outtmpl": video_path,
-                "overwrites": True,
-                "quiet": True,
-                "no_warnings": True,
-                "progress_hooks": [_yt_progress_hook],
-                **self.get_anti_403_headers()
-            }
-
-            try:
-                with yt_dlp.YoutubeDL(ydl_video_opts) as ydl:
-                    ydl.download([url])
-            except Exception as e:
-                self.logger.warning(f"[Ingestion] Primary format spec download failed ({e}). Retrying with best available format...")
-                fallback_opts = dict(ydl_video_opts)
-                fallback_opts["format"] = "best"
-                with yt_dlp.YoutubeDL(fallback_opts) as ydl:
-                    ydl.download([url])
-
-            self.logger.info(f"[Ingestion] Video downloaded to: {video_path}")
+        video_path = os.path.join(work_dir, f"{video_id}_source_{target_height}p.mp4")
+        audio_path = os.path.join(work_dir, f"{video_id}_audio_16k.wav")
 
         # --- SMART RESUME: CHECK AUDIO payload ---
         if os.path.exists(audio_path) and os.path.getsize(audio_path) > 10000:
             self.logger.info(f"[Smart Resume] 16kHz WAV audio already extracted ({audio_path}). Skipping audio extraction.")
-        else:
-            self.logger.info(f"[Ingestion] Extracting 16kHz mono WAV audio stream for Whisper...")
-            ydl_audio_opts = {
-                "format": "bestaudio/best",
-                "outtmpl": os.path.join(work_dir, f"{video_id}_temp_audio.%(ext)s"),
-                "overwrites": True,
-                "quiet": True,
-                "no_warnings": True,
-                "postprocessors": [{
-                    "key": "FFmpegExtractAudio",
-                    "preferredcodec": "wav",
-                    "preferredquality": "192",
-                }],
-                "postprocessor_args": [
-                    "-ar", "16000",  # 16kHz sample rate optimal for Whisper
-                    "-ac", "1",      # Mono channel
-                ],
-                **self.get_anti_403_headers()
+            return {
+                "video_id": video_id,
+                "title": info["title"],
+                "duration": info["duration"],
+                "video_path": video_path,
+                "audio_path": audio_path,
+                "work_dir": work_dir
             }
 
-            try:
-                with yt_dlp.YoutubeDL(ydl_audio_opts) as ydl:
-                    ydl.download([url])
-            except Exception as e:
-                self.logger.warning(f"[Ingestion] Audio extract failed ({e}). Retrying audio download...")
-                with yt_dlp.YoutubeDL(ydl_audio_opts) as ydl:
-                    ydl.download([url])
+        self.logger.info(f"⬇️ [Ingestion] Extracting audio stream for Whisper ('{info['title']}', max={max_duration_seconds/60:.0f}m)...")
 
-            temp_wav = os.path.join(work_dir, f"{video_id}_temp_audio.wav")
-            if os.path.exists(temp_wav):
-                if os.path.exists(audio_path):
-                    os.remove(audio_path)
-                os.rename(temp_wav, audio_path)
+        import yt_dlp.utils
+        ydl_audio_opts = {
+            "format": "bestaudio/best",
+            "outtmpl": os.path.join(work_dir, f"{video_id}_temp_audio.%(ext)s"),
+            "overwrites": True,
+            "quiet": True,
+            "no_warnings": True,
+            "postprocessors": [{
+                "key": "FFmpegExtractAudio",
+                "preferredcodec": "wav",
+                "preferredquality": "192",
+            }],
+            "postprocessor_args": [
+                "-ar", "16000",  # 16kHz sample rate optimal for Whisper
+                "-ac", "1",      # Mono channel
+            ],
+            **self.get_anti_403_headers()
+        }
 
-            self.logger.info(f"[Ingestion] Audio extraction complete: {audio_path}")
+        # If video is longer than max_duration_seconds, stream only the first max_duration_seconds
+        if vid_dur > max_duration_seconds:
+            ydl_audio_opts["download_ranges"] = yt_dlp.utils.download_range_func(None, [(0, max_duration_seconds)])
+
+        try:
+            with yt_dlp.YoutubeDL(ydl_audio_opts) as ydl:
+                ydl.download([url])
+        except Exception as e:
+            self.logger.warning(f"[Ingestion] Stream audio download failed ({e}). Retrying standard audio download...")
+            fallback_opts = dict(ydl_audio_opts)
+            fallback_opts.pop("download_ranges", None)
+            with yt_dlp.YoutubeDL(fallback_opts) as ydl:
+                ydl.download([url])
+
+        temp_wav = os.path.join(work_dir, f"{video_id}_temp_audio.wav")
+        if os.path.exists(temp_wav):
+            if os.path.exists(audio_path):
+                os.remove(audio_path)
+            os.rename(temp_wav, audio_path)
+
+        if not os.path.exists(audio_path) or os.path.getsize(audio_path) == 0:
+            raise RuntimeError(f"Audio extraction failed to produce valid file at: {audio_path}")
+
+        file_size_mb = os.path.getsize(audio_path) / (1024 * 1024)
+        self.logger.info(f"[Ingestion] 16kHz mono WAV audio ready: {audio_path} ({file_size_mb:.2f} MB)")
 
         return {
             "video_id": video_id,

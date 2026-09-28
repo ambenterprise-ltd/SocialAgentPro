@@ -32,6 +32,13 @@ class YouTubePublisher:
 
     def authenticate(self, token_cache_path: str = "token.json") -> bool:
         """Authenticates with YouTube API using local client secrets and token cache."""
+        resolved_file = self.client_secrets_file
+        if not resolved_file or not os.path.exists(resolved_file):
+            from config import ConfigManager
+            resolved_file = ConfigManager.resolve_credential_path(self.client_secrets_file)
+            if resolved_file and os.path.exists(resolved_file):
+                self.client_secrets_file = resolved_file
+
         if not self.client_secrets_file or not os.path.exists(self.client_secrets_file):
             self.logger.warning(
                 "[Publisher] OAuth client_secret.json missing or invalid path: '%s'",
@@ -597,7 +604,8 @@ class MultiPlatformPublisher:
         )
 
         # ── 1. YOUTUBE UPLOAD ─────────────────────────────────────────────
-        yt_oauth = self.config_manager.get_channel_setting("youtube_oauth_json_path", "", self.profile_name).strip()
+        raw_yt_oauth = self.config_manager.get_channel_setting("youtube_oauth_json_path", "", self.profile_name).strip()
+        yt_oauth = self.config_manager.resolve_credential_path(raw_yt_oauth, self.profile_name) if hasattr(self.config_manager, "resolve_credential_path") else raw_yt_oauth
         if upload_yt:
             if yt_oauth and os.path.exists(yt_oauth):
                 try:
